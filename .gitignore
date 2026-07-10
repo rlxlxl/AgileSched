@@ -1,0 +1,8 @@
+node_modules/
+test-output.xlsx
+local-bot-schedule.xlsx
+local-bot-profiles.json
+backups/
+*.log
+.env
+*.xlsx

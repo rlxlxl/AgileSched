@@ -1,0 +1,11 @@
+{
+  "name": "agile-sched",
+  "version": "1.0.0",
+  "description": "Telegram-бот расписания РиМ для YouGile Platform",
+  "private": true,
+  "dependencies": {
+    "exceljs": "^4.4.0",
+    "jszip": "^3.10.1",
+    "telegraf": "^4.16.3"
+  }
+}
