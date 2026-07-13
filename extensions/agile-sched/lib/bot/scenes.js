@@ -2,6 +2,12 @@ const { Scenes, session, Markup } = require('telegraf')
 const { DAYS, DAY_SHORT, WORK_TYPES } = require('../constants')
 const { listSheets, getScheduleIndex } = require('../schedule-index')
 const { applyScheduleRange } = require('../excel-writer')
+const { getEmployeeWeekSchedule } = require('../schedule-reader')
+const {
+  findSheetForDate,
+  findCurrentWeek,
+  extractYearFromSheetName
+} = require('../week-dates')
 const {
   sheetKeyboard,
   weekKeyboard,
@@ -28,6 +34,139 @@ function buildPreview(selection) {
   ].join('\n')
 }
 
+async function replyEmployeeSchedule(ctx, config, sheetName, weekId, employeeName) {
+  const yearHint = extractYearFromSheetName(sheetName)
+  const result = await getEmployeeWeekSchedule(
+    config.excelPath,
+    sheetName,
+    weekId,
+    employeeName,
+    yearHint
+  )
+  await ctx.reply(`${employeeName}\n${result.text}`)
+}
+
+function createViewWizard(getConfig) {
+  const wizard = new Scenes.WizardScene(
+    'view-wizard',
+    async (ctx) => {
+      const config = await getConfig()
+      const sheets = await listSheets(config.excelPath)
+      if (!sheets.length) {
+        await ctx.reply('В файле Excel не найдены листы расписания.')
+        return ctx.scene.leave()
+      }
+
+      const today = new Date()
+      ctx.wizard.state.selection = {}
+      ctx.wizard.state.config = config
+
+      const autoSheet = findSheetForDate(sheets, today)
+      if (autoSheet) {
+        const index = await getScheduleIndex(config.excelPath, autoSheet)
+        const yearHint = extractYearFromSheetName(autoSheet)
+        const currentWeek = findCurrentWeek(index.weeks, today, yearHint)
+
+        ctx.wizard.state.selection.sheetName = autoSheet
+        ctx.wizard.state.index = index
+
+        if (currentWeek) {
+          ctx.wizard.state.selection.weekId = currentWeek.id
+          ctx.wizard.state.selection.weekLabel = currentWeek.label
+          await ctx.reply(
+            [
+              `Текущая неделя: ${currentWeek.label}`,
+              'Выберите отдел:'
+            ].join('\n'),
+            departmentKeyboard(index.departments)
+          )
+          return ctx.wizard.selectStep(3)
+        }
+
+        await ctx.reply(
+          `Лист: ${autoSheet}\nВыберите неделю:`,
+          weekKeyboard(index.weeks)
+        )
+        return ctx.wizard.selectStep(2)
+      }
+
+      ctx.wizard.state.sheets = sheets
+      await ctx.reply('Выберите месяц (лист):', sheetKeyboard(sheets))
+      return ctx.wizard.next()
+    },
+    async (ctx) => {
+      if (!ctx.callbackQuery) return
+      const sheetName = ctx.callbackQuery.data.replace('sheet:', '')
+      await ctx.answerCbQuery()
+      ctx.wizard.state.selection.sheetName = sheetName
+
+      const index = await getScheduleIndex(
+        ctx.wizard.state.config.excelPath,
+        sheetName
+      )
+      ctx.wizard.state.index = index
+      await ctx.editMessageText(
+        `Лист: ${sheetName}\nВыберите неделю:`,
+        weekKeyboard(index.weeks)
+      )
+      return ctx.wizard.next()
+    },
+    async (ctx) => {
+      if (!ctx.callbackQuery) return
+      const weekId = ctx.callbackQuery.data.replace('week:', '')
+      const week = ctx.wizard.state.index.weeks.find((item) => item.id === weekId)
+      await ctx.answerCbQuery()
+      ctx.wizard.state.selection.weekId = weekId
+      ctx.wizard.state.selection.weekLabel = week.label
+      await ctx.editMessageText(
+        `Неделя: ${week.label}\nВыберите отдел:`,
+        departmentKeyboard(ctx.wizard.state.index.departments)
+      )
+      return ctx.wizard.next()
+    },
+    async (ctx) => {
+      if (!ctx.callbackQuery) return
+      const deptIndex = Number(ctx.callbackQuery.data.replace('dept:', ''))
+      const department = ctx.wizard.state.index.departments[deptIndex]
+      await ctx.answerCbQuery()
+      ctx.wizard.state.selection.department = department.name
+      ctx.wizard.state.selection.departmentEmployees = department.employees
+      await ctx.editMessageText(
+        `Отдел: ${department.name}\nВыберите сотрудника:`,
+        employeeKeyboard(department.employees)
+      )
+      return ctx.wizard.next()
+    },
+    async (ctx) => {
+      if (!ctx.callbackQuery) return
+      const empIndex = Number(ctx.callbackQuery.data.replace('emp:', ''))
+      const employee = ctx.wizard.state.selection.departmentEmployees[empIndex]
+      await ctx.answerCbQuery()
+
+      const { selection, config } = ctx.wizard.state
+      try {
+        await replyEmployeeSchedule(
+          ctx,
+          config,
+          selection.sheetName,
+          selection.weekId,
+          employee
+        )
+      } catch (error) {
+        await ctx.reply(`❌ Ошибка: ${error.message}`)
+      }
+      return ctx.scene.leave()
+    }
+  )
+
+  wizard.command('cancel', async (ctx) => {
+    await ctx.reply('Отменено.')
+    return ctx.scene.leave()
+  })
+
+  return wizard
+}
+
 function createScheduleWizard(getConfig, getUserProfile, saveUserProfile) {
   const wizard = new Scenes.WizardScene(
     'schedule-wizard',
@@ -38,9 +177,42 @@ function createScheduleWizard(getConfig, getUserProfile, saveUserProfile) {
         await ctx.reply('В файле Excel не найдены листы расписания.')
         return ctx.scene.leave()
       }
+
+      const today = new Date()
       ctx.wizard.state.selection = {}
       ctx.wizard.state.config = config
       ctx.wizard.state.sheets = sheets
+
+      const autoSheet = findSheetForDate(sheets, today)
+      if (autoSheet) {
+        const index = await getScheduleIndex(config.excelPath, autoSheet)
+        const yearHint = extractYearFromSheetName(autoSheet)
+        const currentWeek = findCurrentWeek(index.weeks, today, yearHint)
+
+        ctx.wizard.state.selection.sheetName = autoSheet
+        ctx.wizard.state.index = index
+
+        if (currentWeek) {
+          ctx.wizard.state.selection.weekId = currentWeek.id
+          ctx.wizard.state.selection.weekLabel = currentWeek.label
+          await ctx.reply(
+            [
+              `Лист: ${autoSheet}`,
+              `Текущая неделя: ${currentWeek.label}`,
+              'Выберите отдел:'
+            ].join('\n'),
+            departmentKeyboard(index.departments)
+          )
+          return ctx.wizard.selectStep(3)
+        }
+
+        await ctx.reply(
+          `Лист: ${autoSheet}\nНе удалось определить текущую неделю.\nВыберите неделю:`,
+          weekKeyboard(index.weeks)
+        )
+        return ctx.wizard.selectStep(2)
+      }
+
       await ctx.reply('Выберите месяц (лист):', sheetKeyboard(sheets))
       return ctx.wizard.next()
     },
@@ -260,8 +432,9 @@ function registerBot(bot, deps) {
     deps.getUserProfile,
     deps.saveUserProfile
   )
+  const viewWizard = createViewWizard(deps.getConfig)
 
-  const stage = new Scenes.Stage([scheduleWizard, profileWizard])
+  const stage = new Scenes.Stage([scheduleWizard, profileWizard, viewWizard])
   bot.use(session())
   bot.use(stage.middleware())
 
@@ -274,10 +447,46 @@ function registerBot(bot, deps) {
 
   bot.command('schedule', async (ctx) => ctx.scene.enter('schedule-wizard'))
   bot.command('my', async (ctx) => ctx.scene.enter('profile-wizard'))
+  bot.command('show', async (ctx) => ctx.scene.enter('view-wizard'))
+
+  bot.command('myschedule', async (ctx) => {
+    const config = await deps.getConfig()
+    const profile = await deps.getUserProfile(ctx.from.id)
+    if (!profile) {
+      await ctx.reply('Сначала привяжите профиль: /my')
+      return
+    }
+    try {
+      const sheets = await listSheets(config.excelPath)
+      const today = new Date()
+      const sheet = findSheetForDate(sheets, today) || profile.sheetName
+      const index = await getScheduleIndex(config.excelPath, sheet)
+      const yearHint = extractYearFromSheetName(sheet)
+      const week = findCurrentWeek(index.weeks, today, yearHint)
+      if (!week) {
+        await ctx.reply('Текущая неделя не найдена. Используйте /show')
+        return
+      }
+      await replyEmployeeSchedule(
+        ctx,
+        config,
+        sheet,
+        week.id,
+        profile.employee
+      )
+    } catch (error) {
+      await ctx.reply(`❌ Ошибка: ${error.message}`)
+    }
+  })
 
   bot.action('menu:schedule', async (ctx) => {
     await ctx.answerCbQuery()
     return ctx.scene.enter('schedule-wizard')
+  })
+
+  bot.action('menu:view', async (ctx) => {
+    await ctx.answerCbQuery()
+    return ctx.scene.enter('view-wizard')
   })
 
   bot.action('menu:profile', async (ctx) => {
@@ -295,6 +504,22 @@ function registerBot(bot, deps) {
     if (profile) {
       lines.push(`Профиль: ${profile.employee} (${profile.department})`)
     }
+    if (config.excelPath && deps.fileExists(config.excelPath)) {
+      try {
+        const sheets = await listSheets(config.excelPath)
+        const today = new Date()
+        const sheet = findSheetForDate(sheets, today)
+        if (sheet) {
+          const index = await getScheduleIndex(config.excelPath, sheet)
+          const yearHint = extractYearFromSheetName(sheet)
+          const week = findCurrentWeek(index.weeks, today, yearHint)
+          lines.push(`Лист сегодня: ${sheet}`)
+          lines.push(week ? `Текущая неделя: ${week.label}` : 'Текущая неделя: не найдена')
+        }
+      } catch {
+        // ignore index errors in status
+      }
+    }
     await ctx.reply(lines.join('\n'))
   })
 }
@@ -302,5 +527,7 @@ function registerBot(bot, deps) {
 module.exports = {
   registerBot,
   createScheduleWizard,
-  createProfileWizard
+  createProfileWizard,
+  createViewWizard,
+  replyEmployeeSchedule
 }
