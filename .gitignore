@@ -6,3 +6,4 @@ backups/
 *.log
 .env
 *.xlsx
+.DS_Store
