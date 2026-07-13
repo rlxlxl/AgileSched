@@ -36,34 +36,90 @@ function parseXml(xml) {
 }
 
 function findStyleIdsByColor(stylesXml) {
+  const fills = parseFills(stylesXml)
+  const xfs = parseCellXfs(stylesXml)
+
+  const byColor = {}
+  for (let styleId = 0; styleId < xfs.length; styleId++) {
+    const fillId = xfs[styleId].fillId
+    const rgb = fills[fillId]?.rgb
+    if (!rgb) continue
+    if (!byColor[rgb]) byColor[rgb] = []
+    byColor[rgb].push(styleId)
+  }
+  return byColor
+}
+
+function findStylesWithThemeFill(stylesXml, themeIndex) {
+  const fills = parseFills(stylesXml)
+  const xfs = parseCellXfs(stylesXml)
+  const matchingFillIds = new Set()
+
+  fills.forEach((meta, fillId) => {
+    if (meta.theme === themeIndex) matchingFillIds.add(fillId)
+  })
+
+  const styleIds = []
+  for (let styleId = 0; styleId < xfs.length; styleId++) {
+    if (matchingFillIds.has(xfs[styleId].fillId)) {
+      styleIds.push(styleId)
+    }
+  }
+  return styleIds
+}
+
+function parseFills(stylesXml) {
   const fills = []
   const fillRegex = /<fill\b[^>]*>([\s\S]*?)<\/fill>|<fill\b[^>]*\/>/g
   let match
   while ((match = fillRegex.exec(stylesXml))) {
     const block = match[0]
     const rgb = (block.match(/fgColor[^>]*rgb="([^"]+)"/) || [])[1] || null
-    fills.push(rgb ? rgb.toUpperCase() : null)
+    const themeMatch = block.match(/fgColor[^>]*theme="(\d+)"/)
+    fills.push({
+      rgb: rgb ? rgb.toUpperCase() : null,
+      theme: themeMatch ? Number(themeMatch[1]) : null
+    })
   }
+  return fills
+}
 
+function parseCellXfs(stylesXml) {
   const xfs = []
   const xfBlock = stylesXml.match(/<cellXfs\b[^>]*>([\s\S]*?)<\/cellXfs>/)
-  if (xfBlock) {
-    const xfRegex = /<xf\b[^>]*\/?>/g
-    let xfMatch
-    while ((xfMatch = xfRegex.exec(xfBlock[1]))) {
-      const fillId = Number((xfMatch[0].match(/fillId="(\d+)"/) || [])[1] || 0)
-      xfs.push(fillId)
-    }
-  }
+  if (!xfBlock) return xfs
 
-  const byColor = {}
-  for (let styleId = 0; styleId < xfs.length; styleId++) {
-    const fillId = xfs[styleId]
-    const rgb = fills[fillId]
-    if (!rgb) continue
-    if (!byColor[rgb]) byColor[rgb] = styleId
+  const xfRegex = /<xf\b[^>]*\/?>/g
+  let xfMatch
+  while ((xfMatch = xfRegex.exec(xfBlock[1]))) {
+    const tag = xfMatch[0]
+    xfs.push({
+      fillId: Number((tag.match(/fillId="(\d+)"/) || [])[1] || 0)
+    })
   }
-  return byColor
+  return xfs
+}
+
+// Styles used in the template for data cells (legend row 9 + typical data rows)
+const PREFERRED_STYLE_IDS = {
+  semi: [132, 42, 44, 58, 143],
+  office: [43, 16, 102, 51],
+  remote: [133, 60, 49, 110]
+}
+
+const REMOTE_THEME_INDEX = 8
+
+function pickStyleId(byColor, color, preferredIds, themeStyleIds = []) {
+  const idsForColor = byColor[color] || []
+  for (const id of preferredIds) {
+    if (idsForColor.includes(id)) return id
+  }
+  if (idsForColor.length) return idsForColor[0]
+  for (const id of themeStyleIds) {
+    if (preferredIds.includes(id)) return id
+  }
+  if (themeStyleIds.length) return themeStyleIds[0]
+  return null
 }
 
 function resolveWorkTypeStyle(stylesXml, workTypeId) {
@@ -72,7 +128,11 @@ function resolveWorkTypeStyle(stylesXml, workTypeId) {
 
   const byColor = findStyleIdsByColor(stylesXml)
   const color = workType.color.toUpperCase()
-  const styleId = byColor[color]
+  const preferred = PREFERRED_STYLE_IDS[workTypeId] || []
+  const themeStyles =
+    workTypeId === 'remote' ? findStylesWithThemeFill(stylesXml, REMOTE_THEME_INDEX) : []
+
+  const styleId = pickStyleId(byColor, color, preferred, themeStyles)
   if (styleId == null) {
     throw new Error(
       `В Excel не найден стиль с цветом ${color} для «${workType.label}». ` +
@@ -248,6 +308,7 @@ async function patchWorkbookCells(excelPath, sheetName, targets, workTypeId) {
 
 module.exports = {
   patchWorkbookCells,
+  resolveWorkTypeStyle,
   cellRef,
   numberToCol,
   colToNumber
