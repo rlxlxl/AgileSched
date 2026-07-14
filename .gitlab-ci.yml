@@ -1,0 +1,16 @@
+stages:
+  - test
+
+default:
+  image: node:20-bookworm
+  cache:
+    key: ${CI_COMMIT_REF_NAME}
+    paths:
+      - extensions/agile-sched/node_modules
+
+test:
+  stage: test
+  script:
+   - cd extensions/agile-sched
+   - npm ci
+   - node -e "require('./lib/constants'); require('./lib/xlsx-patcher'); console.log('OK')"
