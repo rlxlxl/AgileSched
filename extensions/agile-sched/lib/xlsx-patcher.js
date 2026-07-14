@@ -3,9 +3,18 @@ const path = require('path')
 const JSZip = require('jszip')
 const { WORK_TYPES } = require('./constants')
 
-const NS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
-const REL_NS = 'http://schemas.openxmlformats.org/package/2006/relationships'
-const OFF_REL = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
+const OFFICE_GREEN = 'FF00B050'
+const REMOTE_ORANGE_RGB = 'FFFF6D01'
+const REMOTE_THEME_INDEX = 8
+
+// Data-cell styles first; legend styles (row 9) appended dynamically
+const PREFERRED_STYLE_IDS = {
+  semi: [132, 42, 44, 58, 143],
+  office: [43, 16, 102, 51],
+  remote: [60, 49, 110, 133]
+}
+
+const LEGEND_CELLS = { F: 'semi', G: 'office', H: 'remote' }
 
 function colToNumber(col) {
   let n = 0
@@ -30,9 +39,36 @@ function cellRef(row, col) {
   return `${numberToCol(col)}${row}`
 }
 
-function parseXml(xml) {
-  // Lightweight attribute/tag helpers without full DOM dependency
-  return xml
+function parseFills(stylesXml) {
+  const fills = []
+  const fillRegex = /<fill\b[^>]*>([\s\S]*?)<\/fill>|<fill\b[^>]*\/>/g
+  let match
+  while ((match = fillRegex.exec(stylesXml))) {
+    const block = match[0]
+    const rgb = (block.match(/fgColor[^>]*rgb="([^"]+)"/) || [])[1] || null
+    const themeMatch = block.match(/fgColor[^>]*theme="(\d+)"/)
+    fills.push({
+      rgb: rgb ? rgb.toUpperCase() : null,
+      theme: themeMatch ? Number(themeMatch[1]) : null
+    })
+  }
+  return fills
+}
+
+function parseCellXfs(stylesXml) {
+  const xfs = []
+  const xfBlock = stylesXml.match(/<cellXfs\b[^>]*>([\s\S]*?)<\/cellXfs>/)
+  if (!xfBlock) return xfs
+
+  const xfRegex = /<xf\b[^>]*\/?>/g
+  let xfMatch
+  while ((xfMatch = xfRegex.exec(xfBlock[1]))) {
+    const tag = xfMatch[0]
+    xfs.push({
+      fillId: Number((tag.match(/fillId="(\d+)"/) || [])[1] || 0)
+    })
+  }
+  return xfs
 }
 
 function findStyleIdsByColor(stylesXml) {
@@ -68,77 +104,96 @@ function findStylesWithThemeFill(stylesXml, themeIndex) {
   return styleIds
 }
 
-function parseFills(stylesXml) {
-  const fills = []
-  const fillRegex = /<fill\b[^>]*>([\s\S]*?)<\/fill>|<fill\b[^>]*\/>/g
-  let match
-  while ((match = fillRegex.exec(stylesXml))) {
-    const block = match[0]
-    const rgb = (block.match(/fgColor[^>]*rgb="([^"]+)"/) || [])[1] || null
-    const themeMatch = block.match(/fgColor[^>]*theme="(\d+)"/)
-    fills.push({
-      rgb: rgb ? rgb.toUpperCase() : null,
-      theme: themeMatch ? Number(themeMatch[1]) : null
-    })
+function styleFillColor(stylesXml, styleId) {
+  const fills = parseFills(stylesXml)
+  const xfs = parseCellXfs(stylesXml)
+  if (styleId < 0 || styleId >= xfs.length) return null
+  const fill = fills[xfs[styleId].fillId]
+  if (!fill) return null
+  return { rgb: fill.rgb, theme: fill.theme }
+}
+
+function isGreenFill(fillColor) {
+  if (!fillColor) return false
+  return fillColor.rgb === OFFICE_GREEN
+}
+
+function isOrangeFill(fillColor) {
+  if (!fillColor) return false
+  return fillColor.rgb === REMOTE_ORANGE_RGB || fillColor.theme === REMOTE_THEME_INDEX
+}
+
+function resolveLegendStyles(sheetXml) {
+  const legend = { semi: null, office: null, remote: null }
+  for (const [col, key] of Object.entries(LEGEND_CELLS)) {
+    const match = sheetXml.match(new RegExp(`<c r="${col}9" s="(\\d+)"`))
+    if (match) legend[key] = Number(match[1])
   }
-  return fills
+  return legend
 }
 
-function parseCellXfs(stylesXml) {
-  const xfs = []
-  const xfBlock = stylesXml.match(/<cellXfs\b[^>]*>([\s\S]*?)<\/cellXfs>/)
-  if (!xfBlock) return xfs
-
-  const xfRegex = /<xf\b[^>]*\/?>/g
-  let xfMatch
-  while ((xfMatch = xfRegex.exec(xfBlock[1]))) {
-    const tag = xfMatch[0]
-    xfs.push({
-      fillId: Number((tag.match(/fillId="(\d+)"/) || [])[1] || 0)
-    })
+function buildPreferredIds(workTypeId, legendStyles) {
+  const base = [...(PREFERRED_STYLE_IDS[workTypeId] || [])]
+  const legendId = legendStyles?.[workTypeId]
+  if (legendId != null && !base.includes(legendId)) {
+    base.push(legendId)
   }
-  return xfs
+  return base
 }
 
-// Styles used in the template for data cells (legend row 9 + typical data rows)
-const PREFERRED_STYLE_IDS = {
-  semi: [132, 42, 44, 58, 143],
-  office: [43, 16, 102, 51],
-  remote: [133, 60, 49, 110]
-}
-
-const REMOTE_THEME_INDEX = 8
-
-function pickStyleId(byColor, color, preferredIds, themeStyleIds = []) {
+function pickStyleId(byColor, color, preferredIds, themeStyleIds = [], stylesXml = null, workTypeId = null) {
   const idsForColor = byColor[color] || []
+  const candidates = []
+
   for (const id of preferredIds) {
-    if (idsForColor.includes(id)) return id
+    if (idsForColor.includes(id) || themeStyleIds.includes(id)) {
+      candidates.push(id)
+    }
   }
-  if (idsForColor.length) return idsForColor[0]
-  for (const id of themeStyleIds) {
-    if (preferredIds.includes(id)) return id
+  if (!candidates.length) {
+    if (idsForColor.length) candidates.push(...idsForColor)
+    else if (themeStyleIds.length) candidates.push(...themeStyleIds)
   }
-  if (themeStyleIds.length) return themeStyleIds[0]
-  return null
+
+  if (stylesXml && workTypeId === 'remote') {
+    for (const id of candidates) {
+      const fill = styleFillColor(stylesXml, id)
+      if (isOrangeFill(fill) && !isGreenFill(fill)) return id
+    }
+    return null
+  }
+
+  return candidates[0] ?? null
 }
 
-function resolveWorkTypeStyle(stylesXml, workTypeId) {
+function resolveWorkTypeStyle(stylesXml, workTypeId, legendStyles = {}) {
   const workType = WORK_TYPES[workTypeId]
   if (!workType) throw new Error(`Неизвестный тип работы: ${workTypeId}`)
 
   const byColor = findStyleIdsByColor(stylesXml)
   const color = workType.color.toUpperCase()
-  const preferred = PREFERRED_STYLE_IDS[workTypeId] || []
+  const preferred = buildPreferredIds(workTypeId, legendStyles)
   const themeStyles =
     workTypeId === 'remote' ? findStylesWithThemeFill(stylesXml, REMOTE_THEME_INDEX) : []
 
-  const styleId = pickStyleId(byColor, color, preferred, themeStyles)
+  const styleId = pickStyleId(byColor, color, preferred, themeStyles, stylesXml, workTypeId)
   if (styleId == null) {
     throw new Error(
       `В Excel не найден стиль с цветом ${color} для «${workType.label}». ` +
         'Добавьте легенду Очно/Дистанц/Очно (0,5ч) на лист.'
     )
   }
+
+  if (workTypeId === 'remote') {
+    const fill = styleFillColor(stylesXml, styleId)
+    if (isGreenFill(fill)) {
+      throw new Error(
+        `Для «${workType.label}» выбран зелёный стиль ${styleId}. ` +
+          'Проверьте легенду и стили заливки в Excel.'
+      )
+    }
+  }
+
   return { styleId, value: workType.value, color }
 }
 
@@ -205,11 +260,8 @@ function upsertCellInRow(rowXml, ref, cellXml) {
   }
 
   const insertBefore = cells.find((c) => c.col > col)
-  const openEnd = rowXml.indexOf('>') + 1
-  // self-closing row unlikely; find content start after opening tag
   const openMatch = rowXml.match(/^<row\b[^>]*\/?>/)
   if (openMatch && openMatch[0].endsWith('/>')) {
-    // empty self-closing row -> expand
     const openTag = openMatch[0].replace(/\/>$/, '>')
     return `${openTag}${cellXml}</row>`
   }
@@ -237,7 +289,6 @@ function ensureRow(sheetXml, rowNumber, cellXml, ref) {
     return sheetXml.replace(found[0], updated)
   }
 
-  // Create a new row and insert in order inside sheetData
   const newRow = `<row r="${rowNumber}">${cellXml}</row>`
   const sheetDataMatch = sheetXml.match(/<sheetData\b[^>]*>([\s\S]*?)<\/sheetData>/)
   if (!sheetDataMatch) {
@@ -285,13 +336,15 @@ async function patchWorkbookCells(excelPath, sheetName, targets, workTypeId) {
   const stylesFile = zip.file('xl/styles.xml')
   if (!stylesFile) throw new Error('В файле нет xl/styles.xml')
   const stylesXml = await stylesFile.async('string')
-  const { styleId, value } = resolveWorkTypeStyle(stylesXml, workTypeId)
 
   const sheetPath = await resolveSheetPath(zip, sheetName)
   const sheetFile = zip.file(sheetPath)
   if (!sheetFile) throw new Error(`Не найден файл листа: ${sheetPath}`)
 
   const sheetXml = await sheetFile.async('string')
+  const legendStyles = resolveLegendStyles(sheetXml)
+  const { styleId, value } = resolveWorkTypeStyle(stylesXml, workTypeId, legendStyles)
+
   const patches = targets.map((t) => ({ row: t.row, col: t.col, value }))
   const nextXml = applyPatchesToSheetXml(sheetXml, patches, styleId)
   zip.file(sheetPath, nextXml)
@@ -309,6 +362,8 @@ async function patchWorkbookCells(excelPath, sheetName, targets, workTypeId) {
 module.exports = {
   patchWorkbookCells,
   resolveWorkTypeStyle,
+  resolveLegendStyles,
+  styleFillColor,
   cellRef,
   numberToCol,
   colToNumber
