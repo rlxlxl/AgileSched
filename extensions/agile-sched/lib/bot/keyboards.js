@@ -73,16 +73,16 @@ function workTypeKeyboard() {
 
 function confirmKeyboard() {
   return Markup.inlineKeyboard([
-    [Markup.button.callback('✅ Сохранить', 'confirm:save')],
-    [Markup.button.callback('❌ Отмена', 'confirm:cancel')]
+    [Markup.button.callback('Сохранить', 'confirm:save')],
+    [Markup.button.callback('Отмена', 'confirm:cancel')]
   ])
 }
 
 function mainMenuKeyboard() {
   return Markup.inlineKeyboard([
-    [Markup.button.callback('📅 Заполнить расписание', 'menu:schedule')],
-    [Markup.button.callback('📋 Показать расписание', 'menu:view')],
-    [Markup.button.callback('👤 Привязать профиль (/my)', 'menu:profile')]
+    [Markup.button.callback('Заполнить расписание', 'menu:schedule')],
+    [Markup.button.callback('Показать расписание', 'menu:view')],
+    [Markup.button.callback('Привязать профиль (/my)', 'menu:profile')]
   ])
 }
 
