@@ -23,7 +23,7 @@ const {
 function buildPreview(selection) {
   const workType = WORK_TYPES[selection.workTypeId]
   return [
-    '📋 Превью изменений:',
+    'Превью изменений:',
     `Лист: ${selection.sheetName}`,
     `Неделя: ${selection.weekLabel}`,
     `Отдел: ${selection.department}`,
@@ -153,7 +153,7 @@ function createViewWizard(getConfig) {
           employee
         )
       } catch (error) {
-        await ctx.reply(`❌ Ошибка: ${error.message}`)
+        await ctx.reply(`Ошибка: ${error.message}`)
       }
       return ctx.scene.leave()
     }
@@ -351,13 +351,13 @@ function createScheduleWizard(getConfig, getUserProfile, saveUserProfile) {
         )
         await ctx.editMessageText(
           [
-            '✅ Расписание сохранено!',
+            'Расписание сохранено',
             `Обновлено ячеек: ${result.cellsUpdated}`,
             `Резервная копия: ${result.backupPath}`
           ].join('\n')
         )
       } catch (error) {
-        await ctx.editMessageText(`❌ Ошибка сохранения: ${error.message}`)
+        await ctx.editMessageText(`Ошибка сохранения: ${error.message}`)
       }
 
       return ctx.scene.leave()
@@ -475,7 +475,7 @@ function registerBot(bot, deps) {
         profile.employee
       )
     } catch (error) {
-      await ctx.reply(`❌ Ошибка: ${error.message}`)
+      await ctx.reply(`Ошибка: ${error.message}`)
     }
   })
 
