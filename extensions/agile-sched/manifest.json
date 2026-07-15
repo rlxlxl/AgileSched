@@ -1,6 +1,6 @@
 {
   "name": "Расписание РиМ",
-  "description": "Telegram-бот для заполнения графика работы в Excel (очно / полуочно / дистанционно)",
+  "description": "Telegram-бот расписания: пишет в Excel на Google Drive (volume в Docker). Очно / полуочно / дистанционно.",
   "ui": ["ui.js"],
   "service": "service.js"
 }

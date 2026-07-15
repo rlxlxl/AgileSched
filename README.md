@@ -1,11 +1,16 @@
 # AgileSched — Telegram-бот расписания для YouGile
 
-Расширение для коробочной версии **YouGile Платформа**, которое заполняет Excel-файл «Расписашка РиМ» через Telegram-бота.
+Расширение для **YouGile Платформа**: заполняет Excel «Расписашка РиМ» через Telegram. Файл может лежать в **Google Drive** (локальный sync): в Docker монтируется папка Диска, бот пишет в `.xlsx`, команда смотрит по ссылке.
+
+Подробная установка (volume, config, правила просмотра):  
+[`extensions/agile-sched/README.md`](extensions/agile-sched/README.md)
 
 ## Быстрый старт
 
 1. Установите расширение из [`extensions/agile-sched/`](extensions/agile-sched/)
-2. Следуйте инструкции в [`extensions/agile-sched/README.md`](extensions/agile-sched/README.md)
+2. Смонтируйте папку Google Drive в `/opt/yougile/user-data/drive`
+3. Заполните `config.json` (токен + `excelPath` внутри контейнера)
+4. Включите расширение в YouGile, в Telegram: `/start`
 
 ## Локальный запуск бота (без YouGile)
 
@@ -17,21 +22,14 @@ export BOT_TOKEN="токен_от_BotFather"
 node scripts/run-bot-local.js
 ```
 
-Бот пишет в копию `local-bot-schedule.xlsx` (оригинал не трогается). В Telegram: `/start`.
-
-Опционально свой файл: `export EXCEL_PATH="/путь/к/файлу.xlsx"`
-
 ## Локальный тест парсера
 
 ```bash
-cd extensions/agile-sched && npm install
-cd ../..
 node scripts/test-parser.js
 ```
 
 ## Файлы
 
-- [`Расписашка РиМ (1).xlsx`](Расписашка%20РиМ%20(1).xlsx) — исходная таблица
 - [`extensions/agile-sched/`](extensions/agile-sched/) — расширение YouGile
-- [`scripts/run-bot-local.js`](scripts/run-bot-local.js) — локальный запуск бота
+- [`scripts/run-bot-local.js`](scripts/run-bot-local.js) — локальный бот
 - [`scripts/test-parser.js`](scripts/test-parser.js) — тест парсера и записи

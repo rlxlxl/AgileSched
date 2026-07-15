@@ -353,7 +353,9 @@ function createScheduleWizard(getConfig, getUserProfile, saveUserProfile) {
           [
             'Расписание сохранено',
             `Обновлено ячеек: ${result.cellsUpdated}`,
-            `Резервная копия: ${result.backupPath}`
+            `Резервная копия: ${result.backupPath}`,
+            result.driveSyncHint ||
+              'Синхронизация Google Drive: 5–30 сек. Откройте .xlsx по ссылке (не Google Таблицы).'
           ].join('\n')
         )
       } catch (error) {
@@ -497,9 +499,16 @@ function registerBot(bot, deps) {
   bot.command('status', async (ctx) => {
     const config = await deps.getConfig()
     const profile = await deps.getUserProfile(ctx.from.id)
+    const access =
+      typeof deps.assertExcelAccessible === 'function'
+        ? deps.assertExcelAccessible(config.excelPath)
+        : {
+            ok: deps.fileExists(config.excelPath),
+            error: 'Файл не найден'
+          }
     const lines = [
       `Excel: ${config.excelPath || 'не задан'}`,
-      `Файл существует: ${deps.fileExists(config.excelPath) ? 'да' : 'нет'}`
+      `Доступ: ${access.ok ? 'да (чтение/запись)' : 'нет — ' + access.error}`
     ]
     if (profile) {
       lines.push(`Профиль: ${profile.employee} (${profile.department})`)
