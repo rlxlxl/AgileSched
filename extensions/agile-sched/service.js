@@ -204,6 +204,22 @@ async function main() {
     }
   })
 
+  const taskHandler = function (task, prevTaskData) {
+    yougileChat.onTaskChanged(task, prevTaskData).catch(function (error) {
+      console.error('[agile-sched] task handler failed:', error)
+    })
+  }
+
+  await Api.setupEventCallback({
+    event: 'task-created',
+    handler: taskHandler
+  })
+
+  await Api.setupEventCallback({
+    event: 'task-updated',
+    handler: taskHandler
+  })
+
   Service.getSettings = async function () {
     const privateData = await getPrivateData()
     const excelAccess = describeExcelAccess(privateData.excelPath)

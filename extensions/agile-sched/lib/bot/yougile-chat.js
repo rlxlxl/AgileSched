@@ -7,9 +7,18 @@ const {
   findCurrentWeek,
   extractYearFromSheetName
 } = require('../week-dates')
+const {
+  getTaskAssigned,
+  isSubtask,
+  assignedChanged,
+  formatLinkedProfileMessage,
+  fetchTask,
+  resolveSubtaskAssigneeProfile
+} = require('./task-context')
 
 const BOT_LABEL = 'Расписание РиМ'
 const sessions = new Map()
+const chatLinkedProfiles = new Map()
 
 function formatList(items) {
   return items
@@ -130,9 +139,66 @@ async function createYougileChatBot(deps) {
     )
   }
 
+  async function getLinkedProfile(chatId) {
+    const cached = chatLinkedProfiles.get(String(chatId))
+    if (cached) return cached
+
+    const linked = await resolveSubtaskAssigneeProfile(
+      { Api: Api, getUserProfile: getUserProfile },
+      chatId
+    )
+    if (linked) {
+      chatLinkedProfiles.set(String(chatId), linked)
+    }
+    return linked
+  }
+
+  function applyLinkedProfileToSession(session, linked) {
+    if (!linked) {
+      session.linkedProfile = null
+      session.linkedAssigneeUserId = null
+      return
+    }
+    session.linkedProfile = linked.profile
+    session.linkedAssigneeUserId = linked.assigneeUserId
+  }
+
+  async function maybeApplyLinkedEmployee(chatId, session) {
+    let profile = session.linkedProfile
+    if (!profile) {
+      const linked = await getLinkedProfile(chatId)
+      profile = linked && linked.profile
+    }
+    if (!profile || !session.index) return false
+
+    const department = session.index.departments.find(function (d) {
+      return d.name === profile.department
+    })
+    if (!department) return false
+    if (department.employees.indexOf(profile.employee) === -1) {
+      return false
+    }
+
+    session.selection.department = department.name
+    session.selection.employee = profile.employee
+    session.options = DAYS.slice()
+    session.step = 'startDay'
+    await askList(
+      chatId,
+      'Ответственный: ' +
+        profile.employee +
+        '\nВыберите начало недели:',
+      session.options.map(function (d) {
+        return DAY_SHORT[d] + ' (' + d + ')'
+      })
+    )
+    return true
+  }
+
   async function showStatus(chatId, userId) {
     const config = await getConfig()
-    const profile = await getUserProfile(userId)
+    const linked = await getLinkedProfile(chatId)
+    const profile = linked ? linked.profile : await getUserProfile(userId)
     const access = assertAccess
       ? assertAccess(config.excelPath)
       : { ok: false, error: 'нет проверки' }
@@ -140,7 +206,15 @@ async function createYougileChatBot(deps) {
       'Excel: ' + (config.excelPath || 'не задан'),
       'Доступ: ' + (access.ok ? 'да' : access.error)
     ]
-    if (profile) {
+    if (linked) {
+      lines.push(
+        'Ответственный (подзадача): ' +
+          profile.employee +
+          ' (' +
+          profile.department +
+          ')'
+      )
+    } else if (profile) {
       lines.push('Профиль: ' + profile.employee + ' (' + profile.department + ')')
     }
     await reply(chatId, lines.join('\n'))
@@ -148,7 +222,21 @@ async function createYougileChatBot(deps) {
 
   async function showMySchedule(chatId, userId) {
     const config = await getConfig()
-    const profile = await getUserProfile(userId)
+    const linked = await getLinkedProfile(chatId)
+    let profile = linked ? linked.profile : null
+
+    if (!profile) {
+      const task = await fetchTask(Api, chatId)
+      if (isSubtask(task) && getTaskAssigned(task).length) {
+        await reply(
+          chatId,
+          'У ответственного нет привязанного профиля. Попросите его выполнить /my в чате задачи.'
+        )
+        return
+      }
+      profile = await getUserProfile(userId)
+    }
+
     if (!profile) {
       await reply(chatId, 'Сначала привяжите профиль: /my')
       return
@@ -194,8 +282,14 @@ async function createYougileChatBot(deps) {
 
     if (isStartCommand(lower)) {
       session = { step: 'menu', selection: {} }
+      const linked = await getLinkedProfile(chatId)
+      applyLinkedProfileToSession(session, linked)
       sessions.set(key, session)
-      await reply(chatId, mainMenuText())
+      const menu = [mainMenuText()]
+      if (linked) {
+        menu.unshift(formatLinkedProfileMessage(linked.profile))
+      }
+      await reply(chatId, menu.join('\n\n'))
       return
     }
 
@@ -615,6 +709,11 @@ async function createYougileChatBot(deps) {
   }
 
   async function askDepartment(chatId, session) {
+    if (session.flow === 'schedule') {
+      if (await maybeApplyLinkedEmployee(chatId, session)) {
+        return
+      }
+    }
     session.options = session.index.departments.map(function (d) {
       return d.name
     })
@@ -622,7 +721,52 @@ async function createYougileChatBot(deps) {
     await askList(chatId, 'Выберите отдел:', session.options)
   }
 
-  return { handleMessage: handleMessage }
+  async function onTaskChanged(task, prevTaskData) {
+    if (!task || !task.id || !isSubtask(task)) return
+
+    const assigned = getTaskAssigned(task)
+    if (!assigned.length) {
+      chatLinkedProfiles.delete(String(task.id))
+      return
+    }
+
+    const linked = await resolveSubtaskAssigneeProfile(
+      { Api: Api, getUserProfile: getUserProfile },
+      task.id
+    )
+
+    if (!linked) {
+      chatLinkedProfiles.delete(String(task.id))
+      if (assignedChanged(task, prevTaskData)) {
+        await reply(
+          task.id,
+          'Ответственный назначен, но профиль расписания не привязан (/my).'
+        )
+      }
+      return
+    }
+
+    const prevLinked = chatLinkedProfiles.get(String(task.id))
+    chatLinkedProfiles.set(String(task.id), linked)
+
+    const chatPrefix = String(task.id) + ':'
+    sessions.forEach(function (session, key) {
+      if (String(key).indexOf(chatPrefix) === 0) {
+        applyLinkedProfileToSession(session, linked)
+      }
+    })
+
+    const shouldNotify =
+      !prevLinked ||
+      prevLinked.assigneeUserId !== linked.assigneeUserId ||
+      assignedChanged(task, prevTaskData)
+
+    if (shouldNotify) {
+      await reply(task.id, formatLinkedProfileMessage(linked.profile))
+    }
+  }
+
+  return { handleMessage: handleMessage, onTaskChanged: onTaskChanged }
 }
 
 module.exports = { createYougileChatBot, BOT_LABEL }
