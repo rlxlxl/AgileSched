@@ -6,5 +6,6 @@ backups/
 *.log
 .env
 *.xlsx
+*.docx
 .DS_Store
 extensions/agile-sched/config.json
