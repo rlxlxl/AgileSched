@@ -11,6 +11,7 @@ const { registerBot } = require('./lib/bot/scenes')
 const { createYougileChatBot } = require('./lib/bot/yougile-chat')
 const { createUiSession } = require('./lib/bot/yougile-ui-session')
 const { assertExcelAccessible } = require('./lib/excel-writer')
+const { normalizeProfile } = require('./lib/profile')
 
 let bot = null
 let botStatus = {
@@ -84,13 +85,25 @@ async function getConfig() {
 
 async function getUserProfile(userId) {
   const publicData = await getPublicData()
-  return publicData.userProfiles[String(userId)] || null
+  return normalizeProfile(publicData.userProfiles[String(userId)] || null)
 }
 
 async function saveUserProfile(userId, profile) {
   const publicData = await getPublicData()
-  publicData.userProfiles[String(userId)] = profile
+  publicData.userProfiles[String(userId)] = normalizeProfile(profile)
   await savePublicData(publicData)
+}
+
+async function getRateForEmployee(employeeName) {
+  const publicData = await getPublicData()
+  const profiles = publicData.userProfiles || {}
+  for (const key of Object.keys(profiles)) {
+    const profile = normalizeProfile(profiles[key])
+    if (profile && profile.employee === employeeName) {
+      return profile.rate
+    }
+  }
+  return 1
 }
 
 function fileExists(filePath) {
@@ -148,6 +161,7 @@ async function startBot() {
       getConfig: getConfig,
       getUserProfile: getUserProfile,
       saveUserProfile: saveUserProfile,
+      getRateForEmployee: getRateForEmployee,
       fileExists: fileExists,
       assertExcelAccessible: assertExcelAccessible
     })
@@ -189,6 +203,7 @@ async function main() {
     getConfig: getConfig,
     getUserProfile: getUserProfile,
     saveUserProfile: saveUserProfile,
+    getRateForEmployee: getRateForEmployee,
     assertExcelAccessible: assertExcelAccessible,
     logger: logger
   })
@@ -281,6 +296,7 @@ async function main() {
     getConfig: getConfig,
     getUserProfile: getUserProfile,
     saveUserProfile: saveUserProfile,
+    getRateForEmployee: getRateForEmployee,
     getBotStatus: async function () {
       return Service.getBotStatus({})
     },

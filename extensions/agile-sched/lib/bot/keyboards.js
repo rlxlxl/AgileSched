@@ -78,6 +78,13 @@ function confirmKeyboard() {
   ])
 }
 
+function rateKeyboard() {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback('1 — полная ставка (40 ч/нед)', 'rate:1')],
+    [Markup.button.callback('0,5 — полставки (20 ч/нед)', 'rate:0.5')]
+  ])
+}
+
 function mainMenuKeyboard() {
   return Markup.inlineKeyboard([
     [Markup.button.callback('Заполнить расписание', 'menu:schedule')],
@@ -95,5 +102,6 @@ module.exports = {
   timeKeyboard,
   workTypeKeyboard,
   confirmKeyboard,
-  mainMenuKeyboard
+  mainMenuKeyboard,
+  rateKeyboard
 }

@@ -3,6 +3,8 @@ const { DAYS, DAY_SHORT, WORK_TYPES } = require('../constants')
 const { listSheets, getScheduleIndex } = require('../schedule-index')
 const { applyScheduleRange } = require('../excel-writer')
 const { getEmployeeWeekSchedule } = require('../schedule-reader')
+const { formatNormSummary } = require('../hours-calculator')
+const { formatRateLine } = require('../profile')
 const {
   findSheetForDate,
   findCurrentWeek,
@@ -17,7 +19,8 @@ const {
   timeKeyboard,
   workTypeKeyboard,
   confirmKeyboard,
-  mainMenuKeyboard
+  mainMenuKeyboard,
+  rateKeyboard
 } = require('./keyboards')
 
 function buildPreview(selection) {
@@ -34,19 +37,20 @@ function buildPreview(selection) {
   ].join('\n')
 }
 
-async function replyEmployeeSchedule(ctx, config, sheetName, weekId, employeeName) {
+async function replyEmployeeSchedule(ctx, config, sheetName, weekId, employeeName, rate) {
   const yearHint = extractYearFromSheetName(sheetName)
   const result = await getEmployeeWeekSchedule(
     config.excelPath,
     sheetName,
     weekId,
     employeeName,
-    yearHint
+    yearHint,
+    { rate: rate }
   )
   await ctx.reply(`${employeeName}\n${result.text}`)
 }
 
-function createViewWizard(getConfig) {
+function createViewWizard(getConfig, getRateForEmployee) {
   const wizard = new Scenes.WizardScene(
     'view-wizard',
     async (ctx) => {
@@ -145,12 +149,16 @@ function createViewWizard(getConfig) {
 
       const { selection, config } = ctx.wizard.state
       try {
+        const rate = getRateForEmployee
+          ? await getRateForEmployee(employee)
+          : undefined
         await replyEmployeeSchedule(
           ctx,
           config,
           selection.sheetName,
           selection.weekId,
-          employee
+          employee,
+          rate
         )
       } catch (error) {
         await ctx.reply(`Ошибка: ${error.message}`)
@@ -167,7 +175,7 @@ function createViewWizard(getConfig) {
   return wizard
 }
 
-function createScheduleWizard(getConfig, getUserProfile, saveUserProfile) {
+function createScheduleWizard(getConfig, getUserProfile, saveUserProfile, getRateForEmployee) {
   const wizard = new Scenes.WizardScene(
     'schedule-wizard',
     async (ctx) => {
@@ -349,15 +357,31 @@ function createScheduleWizard(getConfig, getUserProfile, saveUserProfile) {
           selection.sheetName,
           selection
         )
-        await ctx.editMessageText(
-          [
-            'Расписание сохранено',
-            `Обновлено ячеек: ${result.cellsUpdated}`,
-            `Резервная копия: ${result.backupPath}`,
-            result.driveSyncHint ||
-              'Синхронизация Google Drive: 5–30 сек. Откройте .xlsx по ссылке (не Google Таблицы).'
-          ].join('\n')
-        )
+        const lines = [
+          'Расписание сохранено',
+          `Обновлено ячеек: ${result.cellsUpdated}`,
+          `Резервная копия: ${result.backupPath}`,
+          result.driveSyncHint ||
+            'Синхронизация Google Drive: 5–30 сек. Откройте .xlsx по ссылке (не Google Таблицы).'
+        ]
+        try {
+          const rate = getRateForEmployee
+            ? await getRateForEmployee(selection.employee)
+            : 1
+          const yearHint = extractYearFromSheetName(selection.sheetName)
+          const summary = await formatNormSummary(
+            config.excelPath,
+            selection.sheetName,
+            selection.weekId,
+            selection.employee,
+            yearHint,
+            rate
+          )
+          lines.push('', summary)
+        } catch (summaryError) {
+          lines.push('', 'Не удалось пересчитать часы: ' + summaryError.message)
+        }
+        await ctx.editMessageText(lines.join('\n'))
       } catch (error) {
         await ctx.editMessageText(`Ошибка сохранения: ${error.message}`)
       }
@@ -408,13 +432,31 @@ function createProfileWizard(getConfig, getUserProfile, saveUserProfile) {
       const empIndex = Number(ctx.callbackQuery.data.replace('emp:', ''))
       const employee = ctx.wizard.state.department.employees[empIndex]
       await ctx.answerCbQuery()
+      ctx.wizard.state.employee = employee
+      await ctx.editMessageText(
+        `Сотрудник: ${employee}\nВыберите ставку:`,
+        rateKeyboard()
+      )
+      return ctx.wizard.next()
+    },
+    async (ctx) => {
+      if (!ctx.callbackQuery) return
+      const rateRaw = ctx.callbackQuery.data.replace('rate:', '')
+      const rate = Number(rateRaw) === 0.5 ? 0.5 : 1
+      await ctx.answerCbQuery()
       await saveUserProfile(ctx.from.id, {
         department: ctx.wizard.state.department.name,
-        employee,
-        sheetName: ctx.wizard.state.defaultSheet
+        employee: ctx.wizard.state.employee,
+        sheetName: ctx.wizard.state.defaultSheet,
+        rate: rate
       })
       await ctx.editMessageText(
-        `Профиль привязан:\n${employee}\n${ctx.wizard.state.department.name}`
+        [
+          'Профиль привязан:',
+          ctx.wizard.state.employee,
+          ctx.wizard.state.department.name,
+          formatRateLine(rate)
+        ].join('\n')
       )
       return ctx.scene.leave()
     }
@@ -427,14 +469,15 @@ function registerBot(bot, deps) {
   const scheduleWizard = createScheduleWizard(
     deps.getConfig,
     deps.getUserProfile,
-    deps.saveUserProfile
+    deps.saveUserProfile,
+    deps.getRateForEmployee
   )
   const profileWizard = createProfileWizard(
     deps.getConfig,
     deps.getUserProfile,
     deps.saveUserProfile
   )
-  const viewWizard = createViewWizard(deps.getConfig)
+  const viewWizard = createViewWizard(deps.getConfig, deps.getRateForEmployee)
 
   const stage = new Scenes.Stage([scheduleWizard, profileWizard, viewWizard])
   bot.use(session())
@@ -474,7 +517,8 @@ function registerBot(bot, deps) {
         config,
         sheet,
         week.id,
-        profile.employee
+        profile.employee,
+        profile.rate
       )
     } catch (error) {
       await ctx.reply(`Ошибка: ${error.message}`)
@@ -512,6 +556,7 @@ function registerBot(bot, deps) {
     ]
     if (profile) {
       lines.push(`Профиль: ${profile.employee} (${profile.department})`)
+      lines.push(formatRateLine(profile.rate))
     }
     if (config.excelPath && deps.fileExists(config.excelPath)) {
       try {

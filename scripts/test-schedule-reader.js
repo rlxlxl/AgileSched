@@ -12,7 +12,7 @@ async function main() {
   const sheets = await listSheets(excelPath)
   const sheet = sheets.find((n) => n.includes('ИЮЛ')) || sheets[sheets.length - 1]
   const index = await getScheduleIndex(excelPath, sheet)
-  const week = index.weeks[1] // Четная 06.07-12.07 with test writes
+  const week = index.weeks[1]
   const yearHint = extractYearFromSheetName(sheet)
 
   const result = await getEmployeeWeekSchedule(
@@ -20,11 +20,13 @@ async function main() {
     sheet,
     week.id,
     'Репин Сергей',
-    yearHint
+    yearHint,
+    { rate: 1 }
   )
 
   console.log('Репин Сергей')
   console.log(result.text)
+  console.log('totalHours:', result.totalHours)
 }
 
 main().catch((e) => {

@@ -7,6 +7,8 @@ const {
   findCurrentWeek,
   extractYearFromSheetName
 } = require('../week-dates')
+const { formatNormSummary } = require('../hours-calculator')
+const { formatRateLine } = require('../profile')
 const {
   getTaskAssigned,
   isSubtask,
@@ -114,6 +116,7 @@ async function createYougileChatBot(deps) {
     getConfig,
     getUserProfile,
     saveUserProfile,
+    getRateForEmployee,
     assertExcelAccessible: assertAccess,
     logger
   } = deps
@@ -214,8 +217,12 @@ async function createYougileChatBot(deps) {
           profile.department +
           ')'
       )
+      if (profile.rate != null) {
+        lines.push(formatRateLine(profile.rate))
+      }
     } else if (profile) {
       lines.push('Профиль: ' + profile.employee + ' (' + profile.department + ')')
+      lines.push(formatRateLine(profile.rate))
     }
     await reply(chatId, lines.join('\n'))
   }
@@ -256,7 +263,8 @@ async function createYougileChatBot(deps) {
       sheet,
       week.id,
       profile.employee,
-      yearHint
+      yearHint,
+      { rate: profile.rate }
     )
     await reply(chatId, profile.employee + '\n' + result.text)
   }
@@ -450,12 +458,16 @@ async function createYougileChatBot(deps) {
       }
       session.selection.employee = session.options[idx]
       if (session.flow === 'view') {
+        const rate = getRateForEmployee
+          ? await getRateForEmployee(session.selection.employee)
+          : undefined
         const result = await getEmployeeWeekSchedule(
           config.excelPath,
           session.selection.sheetName,
           session.selection.weekId,
           session.selection.employee,
-          extractYearFromSheetName(session.selection.sheetName)
+          extractYearFromSheetName(session.selection.sheetName),
+          { rate: rate }
         )
         await reply(chatId, session.selection.employee + '\n' + result.text)
         sessions.delete(key)
@@ -479,15 +491,34 @@ async function createYougileChatBot(deps) {
         await askList(chatId, 'Выберите себя в списке:', session.options)
         return
       }
-      const employee = session.options[idx]
+      session.selection.employee = session.options[idx]
+      session.options = ['1 — полная ставка (40 ч/нед)', '0,5 — полставки (20 ч/нед)']
+      session.step = 'profile-rate'
+      await askList(chatId, 'Выберите ставку:', session.options)
+      return
+    }
+
+    if (session.step === 'profile-rate') {
+      const idx = parseChoice(text, 2)
+      if (idx === null) {
+        await askList(chatId, 'Выберите ставку:', session.options)
+        return
+      }
+      const rate = idx === 1 ? 0.5 : 1
       await saveUserProfile(userId, {
         department: session.selection.department,
-        employee: employee,
-        sheetName: session.selection.sheetName
+        employee: session.selection.employee,
+        sheetName: session.selection.sheetName,
+        rate: rate
       })
       await reply(
         chatId,
-        'Профиль привязан:\n' + employee + '\n' + session.selection.department
+        [
+          'Профиль привязан:',
+          session.selection.employee,
+          session.selection.department,
+          formatRateLine(rate)
+        ].join('\n')
       )
       sessions.delete(key)
       return
@@ -606,16 +637,31 @@ async function createYougileChatBot(deps) {
         session.selection
       )
       sessions.delete(key)
-      await reply(
-        chatId,
-        [
-          'Расписание сохранено',
-          'Обновлено ячеек: ' + result.cellsUpdated,
-          'Резервная копия: ' + result.backupPath,
-          result.driveSyncHint ||
-            'Синхронизация Google Drive: 5–30 сек.'
-        ].join('\n')
-      )
+      const lines = [
+        'Расписание сохранено',
+        'Обновлено ячеек: ' + result.cellsUpdated,
+        'Резервная копия: ' + result.backupPath,
+        result.driveSyncHint ||
+          'Синхронизация Google Drive: 5–30 сек.'
+      ]
+      try {
+        const rate = getRateForEmployee
+          ? await getRateForEmployee(session.selection.employee)
+          : 1
+        const yearHint = extractYearFromSheetName(session.selection.sheetName)
+        const summary = await formatNormSummary(
+          config.excelPath,
+          session.selection.sheetName,
+          session.selection.weekId,
+          session.selection.employee,
+          yearHint,
+          rate
+        )
+        lines.push('', summary)
+      } catch (summaryError) {
+        lines.push('', 'Не удалось пересчитать часы: ' + summaryError.message)
+      }
+      await reply(chatId, lines.join('\n'))
     }
   }
 

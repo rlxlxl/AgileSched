@@ -2,6 +2,8 @@ const { DAYS, DAY_SHORT, WORK_TYPES, TIME_SLOTS } = require('../constants')
 const { listSheets, getScheduleIndex } = require('../schedule-index')
 const { applyScheduleRange, assertExcelAccessible } = require('../excel-writer')
 const { getEmployeeWeekSchedule } = require('../schedule-reader')
+const { formatNormSummary } = require('../hours-calculator')
+const { formatRateLine } = require('../profile')
 const {
   findSheetForDate,
   findCurrentWeek,
@@ -108,7 +110,8 @@ function createUiSession(deps) {
     getBotStatus,
     restartBot,
     getSettingsSnapshot,
-    saveSettingsValues
+    saveSettingsValues,
+    getRateForEmployee
   } = deps
 
   function getSession(userId) {
@@ -390,12 +393,16 @@ function createUiSession(deps) {
       const employee = session.optionMeta[parsed.index]
       session.selection.employee = employee
       if (session.flow === 'view') {
+        const rate = getRateForEmployee
+          ? await getRateForEmployee(employee)
+          : undefined
         const result = await getEmployeeWeekSchedule(
           session.config.excelPath,
           session.selection.sheetName,
           session.selection.weekId,
           employee,
-          extractYearFromSheetName(session.selection.sheetName)
+          extractYearFromSheetName(session.selection.sheetName),
+          { rate: rate }
         )
         clearSession(userId)
         return doneState(employee + '\n' + result.text)
@@ -411,14 +418,31 @@ function createUiSession(deps) {
       )
     } else if (session.step === 'profile-emp' && parsed.prefix === 'emp') {
       const employee = session.optionMeta[parsed.index]
+      session.selection.employee = employee
+      session.step = 'profile-rate'
+      session.optionMeta = [
+        { id: '1', label: '1 — полная ставка (40 ч/нед)' },
+        { id: '0.5', label: '0,5 — полставки (20 ч/нед)' }
+      ]
+      ui = wizardState(session, 'Выберите ставку:', [
+        { id: 'rate:1', label: '1 — полная ставка (40 ч/нед)' },
+        { id: 'rate:0.5', label: '0,5 — полставки (20 ч/нед)' }
+      ])
+    } else if (session.step === 'profile-rate' && parsed.prefix === 'rate') {
+      const rate = parsed.rest === '0.5' ? 0.5 : 1
       await saveUserProfile(userId, {
         department: session.selection.department,
-        employee: employee,
-        sheetName: session.selection.sheetName
+        employee: session.selection.employee,
+        sheetName: session.selection.sheetName,
+        rate: rate
       })
       clearSession(userId)
       return doneState(
-        'Профиль: ' + employee + '\n' + session.selection.department
+        [
+          'Профиль: ' + session.selection.employee,
+          session.selection.department,
+          formatRateLine(rate)
+        ].join('\n')
       )
     } else if (session.step === 'startDay' && parsed.prefix === 'day') {
       session.selection.startDay = DAYS[parsed.index]
@@ -487,14 +511,30 @@ function createUiSession(deps) {
         session.selection.sheetName,
         session.selection
       )
+      let message = [
+        'Сохранено. Ячеек: ' + result.cellsUpdated,
+        result.driveSyncHint ||
+          'Синхронизация Google Drive: 5–30 сек.'
+      ]
+      try {
+        const rate = getRateForEmployee
+          ? await getRateForEmployee(session.selection.employee)
+          : 1
+        const yearHint = extractYearFromSheetName(session.selection.sheetName)
+        const summary = await formatNormSummary(
+          session.config.excelPath,
+          session.selection.sheetName,
+          session.selection.weekId,
+          session.selection.employee,
+          yearHint,
+          rate
+        )
+        message.push('', summary)
+      } catch (summaryError) {
+        message.push('', 'Не удалось пересчитать часы: ' + summaryError.message)
+      }
       clearSession(userId)
-      return doneState(
-        [
-          'Сохранено. Ячеек: ' + result.cellsUpdated,
-          result.driveSyncHint ||
-            'Синхронизация Google Drive: 5–30 сек.'
-        ].join('\n')
-      )
+      return doneState(message.join('\n'))
     } else {
       ui = session.pendingUi || (await getPanelState(userId))
     }
