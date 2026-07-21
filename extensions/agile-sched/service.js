@@ -12,8 +12,10 @@ const { createYougileChatBot } = require('./lib/bot/yougile-chat')
 const { createUiSession } = require('./lib/bot/yougile-ui-session')
 const { assertExcelAccessible } = require('./lib/excel-writer')
 const { normalizeProfile } = require('./lib/profile')
+const { createReminderScheduler } = require('./lib/reminders')
 
 let bot = null
+let reminderScheduler = null
 let botStatus = {
   running: false,
   error: null,
@@ -94,16 +96,34 @@ async function saveUserProfile(userId, profile) {
   await savePublicData(publicData)
 }
 
-async function getRateForEmployee(employeeName) {
+async function getProfileForEmployee(employeeName) {
   const publicData = await getPublicData()
   const profiles = publicData.userProfiles || {}
   for (const key of Object.keys(profiles)) {
     const profile = normalizeProfile(profiles[key])
     if (profile && profile.employee === employeeName) {
-      return profile.rate
+      return profile
     }
   }
-  return 1
+  return null
+}
+
+async function getRateForEmployee(employeeName) {
+  const profile = await getProfileForEmployee(employeeName)
+  return profile ? profile.rate : 1
+}
+
+async function listUserProfiles() {
+  const publicData = await getPublicData()
+  const profiles = publicData.userProfiles || {}
+  const result = []
+  for (const key of Object.keys(profiles)) {
+    result.push({
+      userId: key,
+      profile: normalizeProfile(profiles[key])
+    })
+  }
+  return result
 }
 
 function fileExists(filePath) {
@@ -119,6 +139,10 @@ function describeExcelAccess(excelPath) {
 }
 
 async function stopBot() {
+  if (reminderScheduler) {
+    reminderScheduler.stop()
+    reminderScheduler = null
+  }
   if (bot) {
     try {
       bot.stop('restart')
@@ -161,6 +185,7 @@ async function startBot() {
       getConfig: getConfig,
       getUserProfile: getUserProfile,
       saveUserProfile: saveUserProfile,
+      getProfileForEmployee: getProfileForEmployee,
       getRateForEmployee: getRateForEmployee,
       fileExists: fileExists,
       assertExcelAccessible: assertExcelAccessible
@@ -177,6 +202,16 @@ async function startBot() {
 
     bot.launch().then(function () {
       console.log('[agile-sched] Telegram bot started')
+      reminderScheduler = createReminderScheduler({
+        getConfig: getConfig,
+        listUserProfiles: listUserProfiles,
+        saveUserProfile: saveUserProfile,
+        sendTelegram: async function (userId, text) {
+          await bot.telegram.sendMessage(userId, text)
+        }
+      })
+      reminderScheduler.start()
+      console.log('[agile-sched] reminders scheduler started (Europe/Moscow)')
     })
 
     botStatus = {
@@ -204,6 +239,7 @@ async function main() {
     getUserProfile: getUserProfile,
     saveUserProfile: saveUserProfile,
     getRateForEmployee: getRateForEmployee,
+    getProfileForEmployee: getProfileForEmployee,
     assertExcelAccessible: assertExcelAccessible,
     logger: logger
   })
@@ -297,6 +333,7 @@ async function main() {
     getUserProfile: getUserProfile,
     saveUserProfile: saveUserProfile,
     getRateForEmployee: getRateForEmployee,
+    getProfileForEmployee: getProfileForEmployee,
     getBotStatus: async function () {
       return Service.getBotStatus({})
     },

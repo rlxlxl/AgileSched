@@ -85,6 +85,27 @@ function rateKeyboard() {
   ])
 }
 
+function lunchKeyboard() {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback('Без обеда', 'lunch:0')],
+    [
+      Markup.button.callback('30 мин', 'lunch:30'),
+      Markup.button.callback('45 мин', 'lunch:45')
+    ],
+    [
+      Markup.button.callback('1 ч', 'lunch:60'),
+      Markup.button.callback('1,5 ч', 'lunch:90')
+    ]
+  ])
+}
+
+function inputModeKeyboard() {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback('Пошагово', 'mode:step')],
+    [Markup.button.callback('Одним сообщением', 'mode:freeform')]
+  ])
+}
+
 function mainMenuKeyboard() {
   return Markup.inlineKeyboard([
     [Markup.button.callback('Заполнить расписание', 'menu:schedule')],
@@ -103,5 +124,7 @@ module.exports = {
   workTypeKeyboard,
   confirmKeyboard,
   mainMenuKeyboard,
-  rateKeyboard
+  rateKeyboard,
+  lunchKeyboard,
+  inputModeKeyboard
 }

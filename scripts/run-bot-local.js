@@ -26,7 +26,6 @@ const sourceExcel = path.join(projectRoot, 'Расписашка РиМ (1).xlsx
 const defaultWorkExcel = path.join(projectRoot, 'local-bot-schedule.xlsx')
 const profilesPath = path.join(projectRoot, 'local-bot-profiles.json')
 
-// Resolve telegraf from extension node_modules
 const telegrafPath = path.join(extensionRoot, 'node_modules/telegraf')
 if (!fs.existsSync(telegrafPath)) {
   console.error('Сначала установите зависимости:')
@@ -36,6 +35,9 @@ if (!fs.existsSync(telegrafPath)) {
 
 const { Telegraf } = require(telegrafPath)
 const { registerBot } = require(path.join(extensionRoot, 'lib/bot/scenes'))
+const { normalizeProfile } = require(path.join(extensionRoot, 'lib/profile'))
+const { createReminderScheduler } = require(path.join(extensionRoot, 'lib/reminders'))
+const { assertExcelAccessible } = require(path.join(extensionRoot, 'lib/excel-writer'))
 
 function loadProfiles() {
   if (!fs.existsSync(profilesPath)) return {}
@@ -88,18 +90,46 @@ async function main() {
 
   const profiles = loadProfiles()
 
+  async function getUserProfile(userId) {
+    return normalizeProfile(profiles[String(userId)] || null)
+  }
+
+  async function saveUserProfile(userId, profile) {
+    profiles[String(userId)] = normalizeProfile(profile)
+    saveProfiles(profiles)
+  }
+
+  async function getProfileForEmployee(employeeName) {
+    for (const key of Object.keys(profiles)) {
+      const profile = normalizeProfile(profiles[key])
+      if (profile && profile.employee === employeeName) return profile
+    }
+    return null
+  }
+
+  async function getRateForEmployee(employeeName) {
+    const profile = await getProfileForEmployee(employeeName)
+    return profile ? profile.rate : 1
+  }
+
+  async function listUserProfiles() {
+    return Object.keys(profiles).map(function (userId) {
+      return { userId: userId, profile: normalizeProfile(profiles[userId]) }
+    })
+  }
+
   const bot = new Telegraf(token)
   registerBot(bot, {
     getConfig: async () => ({
       telegramToken: token,
       excelPath
     }),
-    getUserProfile: async (userId) => profiles[String(userId)] || null,
-    saveUserProfile: async (userId, profile) => {
-      profiles[String(userId)] = profile
-      saveProfiles(profiles)
-    },
-    fileExists: (filePath) => Boolean(filePath && fs.existsSync(filePath))
+    getUserProfile,
+    saveUserProfile,
+    getProfileForEmployee,
+    getRateForEmployee,
+    fileExists: (filePath) => Boolean(filePath && fs.existsSync(filePath)),
+    assertExcelAccessible
   })
 
   bot.catch((error, ctx) => {
@@ -109,13 +139,30 @@ async function main() {
     }
   })
 
-  process.once('SIGINT', () => bot.stop('SIGINT'))
-  process.once('SIGTERM', () => bot.stop('SIGTERM'))
+  const scheduler = createReminderScheduler({
+    getConfig: async () => ({ excelPath }),
+    listUserProfiles,
+    saveUserProfile,
+    sendTelegram: async (userId, text) => {
+      await bot.telegram.sendMessage(userId, text)
+    }
+  })
+
+  process.once('SIGINT', () => {
+    scheduler.stop()
+    bot.stop('SIGINT')
+  })
+  process.once('SIGTERM', () => {
+    scheduler.stop()
+    bot.stop('SIGTERM')
+  })
 
   await bot.launch()
+  scheduler.start()
   console.log('Бот запущен локально (без YouGile).')
   console.log('Excel:', excelPath)
   console.log('Профили:', profilesPath)
+  console.log('Напоминания: Europe/Moscow')
   console.log('В Telegram напишите боту /start')
 }
 

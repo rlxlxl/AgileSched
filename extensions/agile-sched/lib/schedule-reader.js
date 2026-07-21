@@ -42,14 +42,15 @@ async function getEmployeeWeekSchedule(
     employeeName,
     yearHint
   )
-  const text = formatHoursReport(weekResult, opts.rate)
+  const text = formatHoursReport(weekResult, opts.rate, opts.lunchMinutes)
 
   return {
     text: text,
     employee: employeeName,
     weekLabel: weekResult.weekLabel,
     totalHours: weekResult.totalHours,
-    days: weekResult.days
+    days: weekResult.days,
+    lunchMinutes: opts.lunchMinutes
   }
 }
 

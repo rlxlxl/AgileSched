@@ -5,7 +5,8 @@ const {
   findEmployeeRow,
   cellText
 } = require('./excel-parser')
-const { normalizeRate } = require('./profile')
+const { normalizeRate, normalizeLunchMinutes } = require('./profile')
+const { parseWeekRange } = require('./week-dates')
 
 function slotHours(slot) {
   const m = String(slot).match(/^(\d{1,2}):\d{2}-(\d{1,2}):\d{2}$/)
@@ -53,6 +54,47 @@ function formatHourRange(range) {
   return range.start + ' - ' + range.end
 }
 
+function lunchHoursFromMinutes(lunchMinutes) {
+  return normalizeLunchMinutes(lunchMinutes) / 60
+}
+
+function applyLunchToDay(grossHours, lunchMinutes) {
+  if (!grossHours || grossHours <= 0) {
+    return { grossHours: 0, netHours: 0, lunchDeducted: 0 }
+  }
+  const lunch = lunchHoursFromMinutes(lunchMinutes)
+  const deducted = Math.min(grossHours, lunch)
+  return {
+    grossHours: grossHours,
+    netHours: Math.max(0, grossHours - deducted),
+    lunchDeducted: deducted
+  }
+}
+
+function applyLunchToWeek(weekResult, lunchMinutes) {
+  const days = (weekResult.days || []).map(function (dayEntry) {
+    const lunch = applyLunchToDay(dayEntry.hours, lunchMinutes)
+    return Object.assign({}, dayEntry, {
+      grossHours: lunch.grossHours,
+      netHours: lunch.netHours,
+      lunchDeducted: lunch.lunchDeducted,
+      hours: lunch.netHours
+    })
+  })
+  const totalGross = days.reduce(function (sum, d) {
+    return sum + (d.grossHours || 0)
+  }, 0)
+  const totalHours = days.reduce(function (sum, d) {
+    return sum + (d.netHours || 0)
+  }, 0)
+  return Object.assign({}, weekResult, {
+    days: days,
+    totalGross: totalGross,
+    totalHours: totalHours,
+    lunchMinutes: normalizeLunchMinutes(lunchMinutes)
+  })
+}
+
 function calculateDayHours(worksheet, dayBlock, employeeName) {
   const row = findEmployeeRow(worksheet, dayBlock, employeeName)
   if (!row) {
@@ -63,9 +105,9 @@ function calculateDayHours(worksheet, dayBlock, employeeName) {
   let hours = 0
   for (const slotInfo of dayBlock.timeSlots) {
     const cell = worksheet.getCell(row, slotInfo.col)
-    const slotHours = cellWorkHours(cell)
-    if (slotHours > 0) {
-      hours += slotHours
+    const slotH = cellWorkHours(cell)
+    if (slotH > 0) {
+      hours += slotH
       filled.push(slotInfo)
     }
   }
@@ -75,8 +117,6 @@ function calculateDayHours(worksheet, dayBlock, employeeName) {
     ranges: mergeFilledSlots(filled)
   }
 }
-
-const { parseWeekRange } = require('./week-dates')
 
 function formatWeekDatesLine(datesText, yearHint) {
   const range = parseWeekRange(datesText, yearHint)
@@ -149,27 +189,46 @@ function checkWeeklyNorm(totalHours, rate) {
 function formatDayLine(dayEntry) {
   const short = DAY_SHORT[dayEntry.day] || dayEntry.day
   const times = dayEntry.ranges.map(formatHourRange).join(', ')
-  return short + ' ' + times + ' (' + dayEntry.hours + ' ч)'
+  const net =
+    dayEntry.netHours != null ? dayEntry.netHours : dayEntry.hours
+  const gross =
+    dayEntry.grossHours != null ? dayEntry.grossHours : dayEntry.hours
+  if (
+    dayEntry.lunchDeducted != null &&
+    dayEntry.lunchDeducted > 0 &&
+    gross !== net
+  ) {
+    return short + ' ' + times + ' (' + net + ' ч нетто)'
+  }
+  return short + ' ' + times + ' (' + net + ' ч)'
 }
 
-function formatHoursReport(weekResult, rate) {
+function formatHoursReport(weekResult, rate, lunchMinutes) {
+  const withLunch =
+    lunchMinutes == null
+      ? weekResult
+      : applyLunchToWeek(weekResult, lunchMinutes)
+
   const lines = []
-  if (weekResult.weekLabel) {
-    lines.push('неделя ' + weekResult.weekLabel)
+  if (withLunch.weekLabel) {
+    lines.push('неделя ' + withLunch.weekLabel)
   }
 
-  if (!weekResult.days.length) {
+  if (!withLunch.days.length) {
     lines.push('(расписание не заполнено)')
   } else {
-    for (const dayEntry of weekResult.days) {
+    for (const dayEntry of withLunch.days) {
       lines.push(formatDayLine(dayEntry))
     }
   }
 
-  const total = weekResult.totalHours || 0
+  const total = withLunch.totalHours || 0
   if (rate != null) {
     const check = checkWeeklyNorm(total, rate)
     lines.push('Итого: ' + total + ' ч из ' + check.norm + ' ч')
+    if (lunchMinutes != null && Number(lunchMinutes) > 0) {
+      lines.push('(с учётом обеда ' + normalizeLunchMinutes(lunchMinutes) + ' мин/день)')
+    }
     if (!check.ok && check.deficit > 0) {
       lines.push('⚠ Не хватает ' + check.deficit + ' ч до нормы')
     }
@@ -180,10 +239,18 @@ function formatHoursReport(weekResult, rate) {
   return lines.join('\n')
 }
 
-function formatNormSummary(excelPath, sheetName, weekId, employeeName, yearHint, rate) {
+function formatNormSummary(
+  excelPath,
+  sheetName,
+  weekId,
+  employeeName,
+  yearHint,
+  rate,
+  lunchMinutes
+) {
   return calculateWeekHours(excelPath, sheetName, weekId, employeeName, yearHint).then(
     function (weekResult) {
-      return formatHoursReport(weekResult, rate)
+      return formatHoursReport(weekResult, rate, lunchMinutes)
     }
   )
 }
@@ -199,5 +266,8 @@ module.exports = {
   formatNormSummary,
   formatDayLine,
   mergeFilledSlots,
-  formatWeekDatesLine
+  formatWeekDatesLine,
+  applyLunchToDay,
+  applyLunchToWeek,
+  lunchHoursFromMinutes
 }

@@ -8,7 +8,11 @@ const {
   extractYearFromSheetName
 } = require('../week-dates')
 const { formatNormSummary } = require('../hours-calculator')
-const { formatRateLine } = require('../profile')
+const { formatRateLine, formatLunchLine, normalizeLunchMinutes } = require('../profile')
+const {
+  parseFreeformSchedule,
+  formatFreeformPreview
+} = require('../freeform-schedule')
 const {
   getTaskAssigned,
   isSubtask,
@@ -117,9 +121,19 @@ async function createYougileChatBot(deps) {
     getUserProfile,
     saveUserProfile,
     getRateForEmployee,
+    getProfileForEmployee,
     assertExcelAccessible: assertAccess,
     logger
   } = deps
+
+  async function resolveEmployeeProfile(employee) {
+    if (getProfileForEmployee) {
+      const profile = await getProfileForEmployee(employee)
+      if (profile) return profile
+    }
+    const rate = getRateForEmployee ? await getRateForEmployee(employee) : 1
+    return { rate: rate, lunchMinutes: 60 }
+  }
 
   async function reply(chatId, text) {
     await Api.post('/chats/' + chatId + '/messages', {
@@ -220,9 +234,13 @@ async function createYougileChatBot(deps) {
       if (profile.rate != null) {
         lines.push(formatRateLine(profile.rate))
       }
+      if (profile.lunchMinutes != null) {
+        lines.push(formatLunchLine(profile.lunchMinutes))
+      }
     } else if (profile) {
       lines.push('Профиль: ' + profile.employee + ' (' + profile.department + ')')
       lines.push(formatRateLine(profile.rate))
+      lines.push(formatLunchLine(profile.lunchMinutes))
     }
     await reply(chatId, lines.join('\n'))
   }
@@ -264,7 +282,7 @@ async function createYougileChatBot(deps) {
       week.id,
       profile.employee,
       yearHint,
-      { rate: profile.rate }
+      { rate: profile.rate, lunchMinutes: profile.lunchMinutes }
     )
     await reply(chatId, profile.employee + '\n' + result.text)
   }
@@ -458,19 +476,37 @@ async function createYougileChatBot(deps) {
       }
       session.selection.employee = session.options[idx]
       if (session.flow === 'view') {
-        const rate = getRateForEmployee
-          ? await getRateForEmployee(session.selection.employee)
-          : undefined
+        const empProfile = await resolveEmployeeProfile(session.selection.employee)
         const result = await getEmployeeWeekSchedule(
           config.excelPath,
           session.selection.sheetName,
           session.selection.weekId,
           session.selection.employee,
           extractYearFromSheetName(session.selection.sheetName),
-          { rate: rate }
+          { rate: empProfile.rate, lunchMinutes: empProfile.lunchMinutes }
         )
         await reply(chatId, session.selection.employee + '\n' + result.text)
         sessions.delete(key)
+        return
+      }
+      session.options = ['Пошагово', 'Одним сообщением']
+      session.step = 'input-mode'
+      await askList(chatId, 'Как заполнить?', session.options)
+      return
+    }
+
+    if (session.step === 'input-mode') {
+      const idx = parseChoice(text, 2)
+      if (idx === null) {
+        await askList(chatId, 'Как заполнить?', session.options)
+        return
+      }
+      if (idx === 1) {
+        session.step = 'freeform-text'
+        await reply(
+          chatId,
+          'Напишите расписание одним сообщением.\nПример: Пн 9:00-18:00, Вт 10:00-19:00, Ср 9-18'
+        )
         return
       }
       session.options = DAYS.slice()
@@ -482,6 +518,121 @@ async function createYougileChatBot(deps) {
           return DAY_SHORT[d] + ' (' + d + ')'
         })
       )
+      return
+    }
+
+    if (session.step === 'freeform-text') {
+      const slots =
+        (session.index && session.index.timeSlots) ||
+        require('../constants').TIME_SLOTS
+      const parsed = parseFreeformSchedule(text, slots)
+      if (!parsed.ok) {
+        await reply(chatId, parsed.error)
+        return
+      }
+      session.freeformEntries = parsed.entries
+      const types = Object.values(WORK_TYPES)
+      session.workTypes = types
+      session.step = 'freeform-work'
+      await askList(
+        chatId,
+        'Разобрано:\n' +
+          formatFreeformPreview(parsed.entries) +
+          '\n\nВыберите вид работы:',
+        types.map(function (t) {
+          return t.emoji + ' ' + t.label
+        })
+      )
+      return
+    }
+
+    if (session.step === 'freeform-work') {
+      const idx = parseChoice(text, session.workTypes.length)
+      if (idx === null) {
+        await askList(
+          chatId,
+          'Выберите вид работы:',
+          session.workTypes.map(function (t) {
+            return t.emoji + ' ' + t.label
+          })
+        )
+        return
+      }
+      session.selection.workTypeId = session.workTypes[idx].id
+      session.step = 'freeform-confirm'
+      await reply(
+        chatId,
+        [
+          'Превью (свободный ввод):',
+          'Сотрудник: ' + session.selection.employee,
+          formatFreeformPreview(session.freeformEntries),
+          'Тип: ' +
+            WORK_TYPES[session.selection.workTypeId].emoji +
+            ' ' +
+            WORK_TYPES[session.selection.workTypeId].label,
+          '',
+          'Ответьте: 1 — сохранить, 2 — отмена'
+        ].join('\n')
+      )
+      return
+    }
+
+    if (session.step === 'freeform-confirm') {
+      const idx = parseChoice(text, 2)
+      if (idx === null) {
+        await reply(chatId, 'Ответьте: 1 — сохранить, 2 — отмена')
+        return
+      }
+      if (idx === 1) {
+        sessions.delete(key)
+        await reply(chatId, 'Заполнение отменено.')
+        return
+      }
+      let cellsUpdated = 0
+      let backupPath = null
+      let driveSyncHint = null
+      for (const entry of session.freeformEntries) {
+        const result = await applyScheduleRange(
+          config.excelPath,
+          session.selection.sheetName,
+          {
+            weekId: session.selection.weekId,
+            employee: session.selection.employee,
+            startDay: entry.day,
+            endDay: entry.day,
+            startTime: entry.startTime,
+            endTime: entry.endTime,
+            workTypeId: session.selection.workTypeId
+          }
+        )
+        cellsUpdated += result.cellsUpdated
+        backupPath = result.backupPath
+        driveSyncHint = result.driveSyncHint
+      }
+      sessions.delete(key)
+      const lines = [
+        'Расписание сохранено',
+        'Обновлено ячеек: ' + cellsUpdated,
+        'Резервная копия: ' + backupPath,
+        driveSyncHint || 'Синхронизация Google Drive: 5–30 сек.'
+      ]
+      try {
+        const empProfile = await resolveEmployeeProfile(session.selection.employee)
+        const yearHint = extractYearFromSheetName(session.selection.sheetName)
+        const summary = await formatNormSummary(
+          config.excelPath,
+          session.selection.sheetName,
+          session.selection.weekId,
+          session.selection.employee,
+          yearHint,
+          empProfile.rate,
+          empProfile.lunchMinutes
+        )
+        lines.push('', summary)
+      } catch (summaryError) {
+        lines.push('', 'Не удалось пересчитать часы: ' + summaryError.message)
+      }
+      await reply(chatId, lines.join('\n'))
       return
     }
 
@@ -504,12 +655,38 @@ async function createYougileChatBot(deps) {
         await askList(chatId, 'Выберите ставку:', session.options)
         return
       }
-      const rate = idx === 1 ? 0.5 : 1
+      session.selection.rate = idx === 1 ? 0.5 : 1
+      session.options = [
+        'Без обеда',
+        '30 мин',
+        '45 мин',
+        '1 ч',
+        '1,5 ч'
+      ]
+      session.lunchValues = [0, 30, 45, 60, 90]
+      session.step = 'profile-lunch'
+      await askList(
+        chatId,
+        formatRateLine(session.selection.rate) +
+          '\nВыберите обед (вычитается из часов дня):',
+        session.options
+      )
+      return
+    }
+
+    if (session.step === 'profile-lunch') {
+      const idx = parseChoice(text, session.options.length)
+      if (idx === null) {
+        await askList(chatId, 'Выберите обед:', session.options)
+        return
+      }
+      const lunchMinutes = normalizeLunchMinutes(session.lunchValues[idx])
       await saveUserProfile(userId, {
         department: session.selection.department,
         employee: session.selection.employee,
         sheetName: session.selection.sheetName,
-        rate: rate
+        rate: session.selection.rate,
+        lunchMinutes: lunchMinutes
       })
       await reply(
         chatId,
@@ -517,7 +694,8 @@ async function createYougileChatBot(deps) {
           'Профиль привязан:',
           session.selection.employee,
           session.selection.department,
-          formatRateLine(rate)
+          formatRateLine(session.selection.rate),
+          formatLunchLine(lunchMinutes)
         ].join('\n')
       )
       sessions.delete(key)
@@ -645,9 +823,7 @@ async function createYougileChatBot(deps) {
           'Синхронизация Google Drive: 5–30 сек.'
       ]
       try {
-        const rate = getRateForEmployee
-          ? await getRateForEmployee(session.selection.employee)
-          : 1
+        const empProfile = await resolveEmployeeProfile(session.selection.employee)
         const yearHint = extractYearFromSheetName(session.selection.sheetName)
         const summary = await formatNormSummary(
           config.excelPath,
@@ -655,7 +831,8 @@ async function createYougileChatBot(deps) {
           session.selection.weekId,
           session.selection.employee,
           yearHint,
-          rate
+          empProfile.rate,
+          empProfile.lunchMinutes
         )
         lines.push('', summary)
       } catch (summaryError) {

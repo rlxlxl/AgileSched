@@ -3,7 +3,7 @@ const { listSheets, getScheduleIndex } = require('../schedule-index')
 const { applyScheduleRange, assertExcelAccessible } = require('../excel-writer')
 const { getEmployeeWeekSchedule } = require('../schedule-reader')
 const { formatNormSummary } = require('../hours-calculator')
-const { formatRateLine } = require('../profile')
+const { formatRateLine, formatLunchLine, normalizeLunchMinutes } = require('../profile')
 const {
   findSheetForDate,
   findCurrentWeek,
@@ -111,8 +111,18 @@ function createUiSession(deps) {
     restartBot,
     getSettingsSnapshot,
     saveSettingsValues,
-    getRateForEmployee
+    getRateForEmployee,
+    getProfileForEmployee
   } = deps
+
+  async function resolveEmployeeProfile(employee) {
+    if (getProfileForEmployee) {
+      const profile = await getProfileForEmployee(employee)
+      if (profile) return profile
+    }
+    const rate = getRateForEmployee ? await getRateForEmployee(employee) : 1
+    return { rate: rate, lunchMinutes: 60 }
+  }
 
   function getSession(userId) {
     const key = String(userId || 'ui')
@@ -393,16 +403,14 @@ function createUiSession(deps) {
       const employee = session.optionMeta[parsed.index]
       session.selection.employee = employee
       if (session.flow === 'view') {
-        const rate = getRateForEmployee
-          ? await getRateForEmployee(employee)
-          : undefined
+        const empProfile = await resolveEmployeeProfile(employee)
         const result = await getEmployeeWeekSchedule(
           session.config.excelPath,
           session.selection.sheetName,
           session.selection.weekId,
           employee,
           extractYearFromSheetName(session.selection.sheetName),
-          { rate: rate }
+          { rate: empProfile.rate, lunchMinutes: empProfile.lunchMinutes }
         )
         clearSession(userId)
         return doneState(employee + '\n' + result.text)
@@ -430,18 +438,35 @@ function createUiSession(deps) {
       ])
     } else if (session.step === 'profile-rate' && parsed.prefix === 'rate') {
       const rate = parsed.rest === '0.5' ? 0.5 : 1
+      session.selection.rate = rate
+      session.step = 'profile-lunch'
+      ui = wizardState(
+        session,
+        formatRateLine(rate) + '\nВыберите обед:',
+        [
+          { id: 'lunch:0', label: 'Без обеда' },
+          { id: 'lunch:30', label: '30 мин' },
+          { id: 'lunch:45', label: '45 мин' },
+          { id: 'lunch:60', label: '1 ч' },
+          { id: 'lunch:90', label: '1,5 ч' }
+        ]
+      )
+    } else if (session.step === 'profile-lunch' && parsed.prefix === 'lunch') {
+      const lunchMinutes = normalizeLunchMinutes(Number(parsed.rest))
       await saveUserProfile(userId, {
         department: session.selection.department,
         employee: session.selection.employee,
         sheetName: session.selection.sheetName,
-        rate: rate
+        rate: session.selection.rate,
+        lunchMinutes: lunchMinutes
       })
       clearSession(userId)
       return doneState(
         [
           'Профиль: ' + session.selection.employee,
           session.selection.department,
-          formatRateLine(rate)
+          formatRateLine(session.selection.rate),
+          formatLunchLine(lunchMinutes)
         ].join('\n')
       )
     } else if (session.step === 'startDay' && parsed.prefix === 'day') {
@@ -517,9 +542,7 @@ function createUiSession(deps) {
           'Синхронизация Google Drive: 5–30 сек.'
       ]
       try {
-        const rate = getRateForEmployee
-          ? await getRateForEmployee(session.selection.employee)
-          : 1
+        const empProfile = await resolveEmployeeProfile(session.selection.employee)
         const yearHint = extractYearFromSheetName(session.selection.sheetName)
         const summary = await formatNormSummary(
           session.config.excelPath,
@@ -527,7 +550,8 @@ function createUiSession(deps) {
           session.selection.weekId,
           session.selection.employee,
           yearHint,
-          rate
+          empProfile.rate,
+          empProfile.lunchMinutes
         )
         message.push('', summary)
       } catch (summaryError) {

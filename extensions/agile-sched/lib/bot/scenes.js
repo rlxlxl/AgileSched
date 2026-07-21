@@ -4,7 +4,15 @@ const { listSheets, getScheduleIndex } = require('../schedule-index')
 const { applyScheduleRange } = require('../excel-writer')
 const { getEmployeeWeekSchedule } = require('../schedule-reader')
 const { formatNormSummary } = require('../hours-calculator')
-const { formatRateLine } = require('../profile')
+const {
+  formatRateLine,
+  formatLunchLine,
+  normalizeLunchMinutes
+} = require('../profile')
+const {
+  parseFreeformSchedule,
+  formatFreeformPreview
+} = require('../freeform-schedule')
 const {
   findSheetForDate,
   findCurrentWeek,
@@ -20,7 +28,9 @@ const {
   workTypeKeyboard,
   confirmKeyboard,
   mainMenuKeyboard,
-  rateKeyboard
+  rateKeyboard,
+  lunchKeyboard,
+  inputModeKeyboard
 } = require('./keyboards')
 
 function buildPreview(selection) {
@@ -37,7 +47,27 @@ function buildPreview(selection) {
   ].join('\n')
 }
 
-async function replyEmployeeSchedule(ctx, config, sheetName, weekId, employeeName, rate) {
+function buildFreeformPreview(selection, entries) {
+  const workType = WORK_TYPES[selection.workTypeId]
+  return [
+    'Превью (свободный ввод):',
+    `Лист: ${selection.sheetName}`,
+    `Неделя: ${selection.weekLabel}`,
+    `Сотрудник: ${selection.employee}`,
+    formatFreeformPreview(entries),
+    `Тип: ${workType.emoji} ${workType.label}`
+  ].join('\n')
+}
+
+async function replyEmployeeSchedule(
+  ctx,
+  config,
+  sheetName,
+  weekId,
+  employeeName,
+  rate,
+  lunchMinutes
+) {
   const yearHint = extractYearFromSheetName(sheetName)
   const result = await getEmployeeWeekSchedule(
     config.excelPath,
@@ -45,12 +75,66 @@ async function replyEmployeeSchedule(ctx, config, sheetName, weekId, employeeNam
     weekId,
     employeeName,
     yearHint,
-    { rate: rate }
+    { rate: rate, lunchMinutes: lunchMinutes }
   )
   await ctx.reply(`${employeeName}\n${result.text}`)
 }
 
-function createViewWizard(getConfig, getRateForEmployee) {
+async function resolveEmployeeProfile(getProfileForEmployee, getRateForEmployee, employee) {
+  if (getProfileForEmployee) {
+    const profile = await getProfileForEmployee(employee)
+    if (profile) return profile
+  }
+  const rate = getRateForEmployee ? await getRateForEmployee(employee) : 1
+  return { rate: rate, lunchMinutes: 60 }
+}
+
+async function applyEntriesAndSummary(config, selection, entries, profile) {
+  let cellsUpdated = 0
+  let backupPath = null
+  let driveSyncHint = null
+  for (const entry of entries) {
+    const result = await applyScheduleRange(config.excelPath, selection.sheetName, {
+      weekId: selection.weekId,
+      weekLabel: selection.weekLabel,
+      department: selection.department,
+      employee: selection.employee,
+      startDay: entry.day,
+      endDay: entry.day,
+      startTime: entry.startTime,
+      endTime: entry.endTime,
+      workTypeId: selection.workTypeId
+    })
+    cellsUpdated += result.cellsUpdated
+    backupPath = result.backupPath
+    driveSyncHint = result.driveSyncHint
+  }
+  const lines = [
+    'Расписание сохранено',
+    `Обновлено ячеек: ${cellsUpdated}`,
+    backupPath ? `Резервная копия: ${backupPath}` : null,
+    driveSyncHint ||
+      'Синхронизация Google Drive: 5–30 сек. Откройте .xlsx по ссылке (не Google Таблицы).'
+  ].filter(Boolean)
+  try {
+    const yearHint = extractYearFromSheetName(selection.sheetName)
+    const summary = await formatNormSummary(
+      config.excelPath,
+      selection.sheetName,
+      selection.weekId,
+      selection.employee,
+      yearHint,
+      profile.rate,
+      profile.lunchMinutes
+    )
+    lines.push('', summary)
+  } catch (summaryError) {
+    lines.push('', 'Не удалось пересчитать часы: ' + summaryError.message)
+  }
+  return lines.join('\n')
+}
+
+function createViewWizard(getConfig, getProfileForEmployee, getRateForEmployee) {
   const wizard = new Scenes.WizardScene(
     'view-wizard',
     async (ctx) => {
@@ -149,16 +233,19 @@ function createViewWizard(getConfig, getRateForEmployee) {
 
       const { selection, config } = ctx.wizard.state
       try {
-        const rate = getRateForEmployee
-          ? await getRateForEmployee(employee)
-          : undefined
+        const profile = await resolveEmployeeProfile(
+          getProfileForEmployee,
+          getRateForEmployee,
+          employee
+        )
         await replyEmployeeSchedule(
           ctx,
           config,
           selection.sheetName,
           selection.weekId,
           employee,
-          rate
+          profile.rate,
+          profile.lunchMinutes
         )
       } catch (error) {
         await ctx.reply(`Ошибка: ${error.message}`)
@@ -175,7 +262,7 @@ function createViewWizard(getConfig, getRateForEmployee) {
   return wizard
 }
 
-function createScheduleWizard(getConfig, getUserProfile, saveUserProfile, getRateForEmployee) {
+function createScheduleWizard(getConfig, getUserProfile, saveUserProfile, getProfileForEmployee, getRateForEmployee) {
   const wizard = new Scenes.WizardScene(
     'schedule-wizard',
     async (ctx) => {
@@ -274,7 +361,24 @@ function createScheduleWizard(getConfig, getUserProfile, saveUserProfile, getRat
       await ctx.answerCbQuery()
       ctx.wizard.state.selection.employee = employee
       await ctx.editMessageText(
-        `Сотрудник: ${employee}\nВыберите начало недели:`,
+        `Сотрудник: ${employee}\nКак заполнить?`,
+        inputModeKeyboard()
+      )
+      return ctx.wizard.next()
+    },
+    async (ctx) => {
+      if (!ctx.callbackQuery) return
+      const mode = ctx.callbackQuery.data.replace('mode:', '')
+      await ctx.answerCbQuery()
+      ctx.wizard.state.inputMode = mode
+      if (mode === 'freeform') {
+        await ctx.editMessageText(
+          'Напишите расписание одним сообщением.\nПример: Пн 9:00-18:00, Вт 10:00-19:00, Ср 9-18'
+        )
+        return ctx.wizard.selectStep(12)
+      }
+      await ctx.editMessageText(
+        'Выберите начало недели:',
         dayKeyboard('startday')
       )
       return ctx.wizard.next()
@@ -352,40 +456,126 @@ function createScheduleWizard(getConfig, getUserProfile, saveUserProfile, getRat
       const config = ctx.wizard.state.config
 
       try {
-        const result = await applyScheduleRange(
-          config.excelPath,
-          selection.sheetName,
-          selection
+        const profile = await resolveEmployeeProfile(
+          getProfileForEmployee,
+          getRateForEmployee,
+          selection.employee
         )
-        const lines = [
-          'Расписание сохранено',
-          `Обновлено ячеек: ${result.cellsUpdated}`,
-          `Резервная копия: ${result.backupPath}`,
-          result.driveSyncHint ||
-            'Синхронизация Google Drive: 5–30 сек. Откройте .xlsx по ссылке (не Google Таблицы).'
+        const entries = ctx.wizard.state.freeformEntries || [
+          {
+            day: selection.startDay,
+            startTime: selection.startTime,
+            endTime: selection.endTime
+          }
         ]
-        try {
-          const rate = getRateForEmployee
-            ? await getRateForEmployee(selection.employee)
-            : 1
-          const yearHint = extractYearFromSheetName(selection.sheetName)
-          const summary = await formatNormSummary(
+        // For step mode single range covering startDay-endDay:
+        if (!ctx.wizard.state.freeformEntries) {
+          const result = await applyScheduleRange(
             config.excelPath,
             selection.sheetName,
-            selection.weekId,
-            selection.employee,
-            yearHint,
-            rate
+            selection
           )
-          lines.push('', summary)
-        } catch (summaryError) {
-          lines.push('', 'Не удалось пересчитать часы: ' + summaryError.message)
+          const lines = [
+            'Расписание сохранено',
+            `Обновлено ячеек: ${result.cellsUpdated}`,
+            `Резервная копия: ${result.backupPath}`,
+            result.driveSyncHint ||
+              'Синхронизация Google Drive: 5–30 сек. Откройте .xlsx по ссылке (не Google Таблицы).'
+          ]
+          try {
+            const yearHint = extractYearFromSheetName(selection.sheetName)
+            const summary = await formatNormSummary(
+              config.excelPath,
+              selection.sheetName,
+              selection.weekId,
+              selection.employee,
+              yearHint,
+              profile.rate,
+              profile.lunchMinutes
+            )
+            lines.push('', summary)
+          } catch (summaryError) {
+            lines.push('', 'Не удалось пересчитать часы: ' + summaryError.message)
+          }
+          await ctx.editMessageText(lines.join('\n'))
+        } else {
+          const text = await applyEntriesAndSummary(
+            config,
+            selection,
+            entries,
+            profile
+          )
+          await ctx.editMessageText(text)
         }
-        await ctx.editMessageText(lines.join('\n'))
       } catch (error) {
         await ctx.editMessageText(`Ошибка сохранения: ${error.message}`)
       }
 
+      return ctx.scene.leave()
+    },
+    // step 12: freeform text
+    async (ctx) => {
+      if (!ctx.message || !ctx.message.text) {
+        await ctx.reply(
+          'Напишите расписание текстом.\nПример: Пн 9:00-18:00, Вт 10:00-19:00'
+        )
+        return
+      }
+      const slots = (ctx.wizard.state.index && ctx.wizard.state.index.timeSlots) || []
+      const parsed = parseFreeformSchedule(ctx.message.text, slots)
+      if (!parsed.ok) {
+        await ctx.reply(parsed.error)
+        return
+      }
+      ctx.wizard.state.freeformEntries = parsed.entries
+      await ctx.reply(
+        'Разобрано:\n' +
+          formatFreeformPreview(parsed.entries) +
+          '\n\nВыберите вид работы:',
+        workTypeKeyboard()
+      )
+      return ctx.wizard.next()
+    },
+    // step 13: freeform work type
+    async (ctx) => {
+      if (!ctx.callbackQuery) return
+      const workTypeId = ctx.callbackQuery.data.replace('work:', '')
+      await ctx.answerCbQuery()
+      ctx.wizard.state.selection.workTypeId = workTypeId
+      const preview = buildFreeformPreview(
+        ctx.wizard.state.selection,
+        ctx.wizard.state.freeformEntries
+      )
+      await ctx.editMessageText(preview, confirmKeyboard())
+      return ctx.wizard.next()
+    },
+    // step 14: freeform confirm
+    async (ctx) => {
+      if (!ctx.callbackQuery) return
+      const action = ctx.callbackQuery.data.replace('confirm:', '')
+      await ctx.answerCbQuery()
+      if (action === 'cancel') {
+        await ctx.editMessageText('Заполнение отменено.')
+        return ctx.scene.leave()
+      }
+      const selection = ctx.wizard.state.selection
+      const config = ctx.wizard.state.config
+      try {
+        const profile = await resolveEmployeeProfile(
+          getProfileForEmployee,
+          getRateForEmployee,
+          selection.employee
+        )
+        const text = await applyEntriesAndSummary(
+          config,
+          selection,
+          ctx.wizard.state.freeformEntries,
+          profile
+        )
+        await ctx.editMessageText(text)
+      } catch (error) {
+        await ctx.editMessageText(`Ошибка сохранения: ${error.message}`)
+      }
       return ctx.scene.leave()
     }
   )
@@ -444,18 +634,32 @@ function createProfileWizard(getConfig, getUserProfile, saveUserProfile) {
       const rateRaw = ctx.callbackQuery.data.replace('rate:', '')
       const rate = Number(rateRaw) === 0.5 ? 0.5 : 1
       await ctx.answerCbQuery()
+      ctx.wizard.state.rate = rate
+      await ctx.editMessageText(
+        `${formatRateLine(rate)}\nВыберите обед (вычитается из часов дня):`,
+        lunchKeyboard()
+      )
+      return ctx.wizard.next()
+    },
+    async (ctx) => {
+      if (!ctx.callbackQuery) return
+      const lunchRaw = ctx.callbackQuery.data.replace('lunch:', '')
+      const lunchMinutes = normalizeLunchMinutes(Number(lunchRaw))
+      await ctx.answerCbQuery()
       await saveUserProfile(ctx.from.id, {
         department: ctx.wizard.state.department.name,
         employee: ctx.wizard.state.employee,
         sheetName: ctx.wizard.state.defaultSheet,
-        rate: rate
+        rate: ctx.wizard.state.rate,
+        lunchMinutes: lunchMinutes
       })
       await ctx.editMessageText(
         [
           'Профиль привязан:',
           ctx.wizard.state.employee,
           ctx.wizard.state.department.name,
-          formatRateLine(rate)
+          formatRateLine(ctx.wizard.state.rate),
+          formatLunchLine(lunchMinutes)
         ].join('\n')
       )
       return ctx.scene.leave()
@@ -470,6 +674,7 @@ function registerBot(bot, deps) {
     deps.getConfig,
     deps.getUserProfile,
     deps.saveUserProfile,
+    deps.getProfileForEmployee,
     deps.getRateForEmployee
   )
   const profileWizard = createProfileWizard(
@@ -477,7 +682,11 @@ function registerBot(bot, deps) {
     deps.getUserProfile,
     deps.saveUserProfile
   )
-  const viewWizard = createViewWizard(deps.getConfig, deps.getRateForEmployee)
+  const viewWizard = createViewWizard(
+    deps.getConfig,
+    deps.getProfileForEmployee,
+    deps.getRateForEmployee
+  )
 
   const stage = new Scenes.Stage([scheduleWizard, profileWizard, viewWizard])
   bot.use(session())
@@ -518,11 +727,72 @@ function registerBot(bot, deps) {
         sheet,
         week.id,
         profile.employee,
-        profile.rate
+        profile.rate,
+        profile.lunchMinutes
       )
     } catch (error) {
       await ctx.reply(`Ошибка: ${error.message}`)
     }
+  })
+
+  bot.command('remind', async (ctx) => {
+    const profile = await deps.getUserProfile(ctx.from.id)
+    if (!profile) {
+      await ctx.reply('Сначала привяжите профиль: /my')
+      return
+    }
+    const args = (ctx.message.text || '').trim().split(/\s+/).slice(1)
+    const cmd = (args[0] || '').toLowerCase()
+    if (!cmd || cmd === 'status') {
+      await ctx.reply(
+        [
+          profile.remindEnabled ? 'Напоминания: вкл' : 'Напоминания: выкл',
+          'День: ' + profile.remindWeekday + ' (1=пн … 7=вс)',
+          'Час: ' + profile.remindHour + ' (Europe/Moscow)',
+          'Команды: /remind on|off, /remind hour 9, /remind day 1'
+        ].join('\n')
+      )
+      return
+    }
+    if (cmd === 'on' || cmd === 'off') {
+      await deps.saveUserProfile(
+        ctx.from.id,
+        Object.assign({}, profile, { remindEnabled: cmd === 'on' })
+      )
+      await ctx.reply(
+        cmd === 'on' ? 'Напоминания включены' : 'Напоминания выключены'
+      )
+      return
+    }
+    if (cmd === 'hour') {
+      const hour = Number(args[1])
+      if (!Number.isInteger(hour) || hour < 0 || hour > 23) {
+        await ctx.reply('Укажите час 0–23. Пример: /remind hour 9')
+        return
+      }
+      await deps.saveUserProfile(
+        ctx.from.id,
+        Object.assign({}, profile, { remindHour: hour })
+      )
+      await ctx.reply('Час напоминания: ' + hour + ':00 (МСК)')
+      return
+    }
+    if (cmd === 'day') {
+      const day = Number(args[1])
+      if (!Number.isInteger(day) || day < 1 || day > 7) {
+        await ctx.reply('Укажите день 1–7 (1=пн). Пример: /remind day 1')
+        return
+      }
+      await deps.saveUserProfile(
+        ctx.from.id,
+        Object.assign({}, profile, { remindWeekday: day })
+      )
+      await ctx.reply('День напоминания: ' + day)
+      return
+    }
+    await ctx.reply(
+      'Команды: /remind on|off|status, /remind hour 9, /remind day 1'
+    )
   })
 
   bot.action('menu:schedule', async (ctx) => {
@@ -557,6 +827,12 @@ function registerBot(bot, deps) {
     if (profile) {
       lines.push(`Профиль: ${profile.employee} (${profile.department})`)
       lines.push(formatRateLine(profile.rate))
+      lines.push(formatLunchLine(profile.lunchMinutes))
+      lines.push(
+        profile.remindEnabled
+          ? `Напоминания: день ${profile.remindWeekday} в ${profile.remindHour}:00 МСК`
+          : 'Напоминания: выкл'
+      )
     }
     if (config.excelPath && deps.fileExists(config.excelPath)) {
       try {
