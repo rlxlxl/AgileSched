@@ -9,3 +9,4 @@ backups/
 *.docx
 .DS_Store
 extensions/agile-sched/config.json
+.cursor/

@@ -30,4 +30,5 @@ echo "→ Перезапуск контейнера"
 docker restart "$CONTAINER"
 
 echo "Готово. В YouGile: Моя компания → Расширения → выкл/вкл «Расписание РиМ»."
+echo "Напишите /start в любой чат"
 echo "Проверка логов: docker logs $CONTAINER --tail 30"
