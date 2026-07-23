@@ -68,6 +68,10 @@ Telegram-бот работает параллельно с тем же Excel.
 
 ## Установка (Docker + Google Drive)
 
+- **Mac (локально):** Google Drive for Desktop + volume в Docker — см. ниже.  
+- **Linux-сервер:** rclone mount + Docker — подробная инструкция:  
+  [`docs/ДЕПЛОЙ_LINUX_DOCKER.md`](docs/ДЕПЛОЙ_LINUX_DOCKER.md)
+
 ### 1. Скопировать расширение
 
 ```bash

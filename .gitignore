@@ -12,3 +12,4 @@ backups/
 extensions/agile-sched/config.json
 .cursor/
 .venv-docs/
+*.txt
