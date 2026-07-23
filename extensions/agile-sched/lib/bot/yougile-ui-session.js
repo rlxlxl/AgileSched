@@ -3,7 +3,7 @@ const { listSheets, getScheduleIndex } = require('../schedule-index')
 const { applyScheduleRange, assertExcelAccessible } = require('../excel-writer')
 const { getEmployeeWeekSchedule } = require('../schedule-reader')
 const { formatNormSummary } = require('../hours-calculator')
-const { formatRateLine, formatLunchLine, normalizeLunchMinutes } = require('../profile')
+const { formatRateLine, formatLunchLine, normalizeLunchMinutes, matchProfileInIndex } = require('../profile')
 const {
   findSheetForDate,
   findCurrentWeek,
@@ -43,7 +43,7 @@ function idleState(panelExtra) {
       message: 'Выберите действие',
       choices: [
         { id: 'menu:fill', label: 'Заполнить' },
-        { id: 'menu:view', label: 'Показать' },
+        { id: 'menu:myschedule', label: 'Моё расписание' },
         { id: 'menu:profile', label: 'Профиль' },
         { id: 'menu:settings', label: 'Настройки' },
         { id: 'menu:status', label: 'Статус' },
@@ -158,6 +158,24 @@ function createUiSession(deps) {
   }
 
   async function askDepartment(session) {
+    if (session.flow === 'fill' && session.userId && getUserProfile) {
+      const profile = await getUserProfile(session.userId)
+      const matched = matchProfileInIndex(session.index, profile)
+      if (matched) {
+        session.selection.department = matched.department
+        session.selection.employee = matched.employee
+        session.step = 'startDay'
+        session.optionMeta = DAYS
+        return wizardState(
+          session,
+          'Профиль: ' + matched.employee + '\nНачало недели:',
+          DAYS.map(function (d, i) {
+            return { id: 'day:' + i, label: DAY_SHORT[d] + ' (' + d + ')' }
+          })
+        )
+      }
+    }
+
     const labels = session.index.departments.map(function (d) {
       return d.name
     })
@@ -183,7 +201,8 @@ function createUiSession(deps) {
       step: 'sheet',
       selection: {},
       config: config,
-      optionMeta: sheets
+      optionMeta: sheets,
+      userId: userId
     }
     setSession(userId, session)
 
@@ -222,6 +241,41 @@ function createUiSession(deps) {
     )
     session.pendingUi = ui
     return ui
+  }
+
+  async function showMyScheduleUi(userId) {
+    const config = await getConfig()
+    const access = assertExcelAccessible(config.excelPath)
+    if (!access.ok) {
+      return doneState(access.error)
+    }
+    const profile = await getUserProfile(userId)
+    if (!profile) {
+      return doneState('Сначала привяжите профиль.')
+    }
+    try {
+      const sheets = await listSheets(config.excelPath)
+      const today = new Date()
+      const sheet = findSheetForDate(sheets, today) || profile.sheetName
+      const index = await getScheduleIndex(config.excelPath, sheet)
+      const yearHint = extractYearFromSheetName(sheet)
+      const week = findCurrentWeek(index.weeks, today, yearHint)
+      if (!week) {
+        return doneState('Текущая неделя не найдена на листе ' + sheet)
+      }
+      const result = await getEmployeeWeekSchedule(
+        config.excelPath,
+        sheet,
+        week.id,
+        profile.employee,
+        yearHint,
+        { rate: profile.rate, lunchMinutes: profile.lunchMinutes }
+      )
+      clearSession(userId)
+      return doneState(profile.employee + '\n' + result.text)
+    } catch (error) {
+      return doneState('Ошибка: ' + error.message)
+    }
   }
 
   async function startView(userId) {
@@ -314,8 +368,8 @@ function createUiSession(deps) {
     if (choiceId === 'menu:fill') {
       return startFill(userId)
     }
-    if (choiceId === 'menu:view') {
-      return startView(userId)
+    if (choiceId === 'menu:myschedule') {
+      return showMyScheduleUi(userId)
     }
     if (choiceId === 'menu:profile') {
       return startProfile(userId)

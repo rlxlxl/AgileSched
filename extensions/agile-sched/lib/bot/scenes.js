@@ -7,7 +7,8 @@ const { formatNormSummary } = require('../hours-calculator')
 const {
   formatRateLine,
   formatLunchLine,
-  normalizeLunchMinutes
+  normalizeLunchMinutes,
+  matchProfileInIndex
 } = require('../profile')
 const {
   parseFreeformSchedule,
@@ -57,6 +58,11 @@ function buildFreeformPreview(selection, entries) {
     formatFreeformPreview(entries),
     `Тип: ${workType.emoji} ${workType.label}`
   ].join('\n')
+}
+
+async function leaveToMenu(ctx) {
+  await ctx.reply('Выберите действие:', mainMenuKeyboard())
+  return ctx.scene.leave()
 }
 
 async function replyEmployeeSchedule(
@@ -142,7 +148,7 @@ function createViewWizard(getConfig, getProfileForEmployee, getRateForEmployee) 
       const sheets = await listSheets(config.excelPath)
       if (!sheets.length) {
         await ctx.reply('В файле Excel не найдены листы расписания.')
-        return ctx.scene.leave()
+        return leaveToMenu(ctx)
       }
 
       const today = new Date()
@@ -250,19 +256,30 @@ function createViewWizard(getConfig, getProfileForEmployee, getRateForEmployee) 
       } catch (error) {
         await ctx.reply(`Ошибка: ${error.message}`)
       }
-      return ctx.scene.leave()
+      return leaveToMenu(ctx)
     }
   )
 
   wizard.command('cancel', async (ctx) => {
     await ctx.reply('Отменено.')
-    return ctx.scene.leave()
+    return leaveToMenu(ctx)
   })
 
   return wizard
 }
 
 function createScheduleWizard(getConfig, getUserProfile, saveUserProfile, getProfileForEmployee, getRateForEmployee) {
+  async function applyBoundProfile(ctx) {
+    if (!getUserProfile) return null
+    const profile = await getUserProfile(ctx.from.id)
+    const matched = matchProfileInIndex(ctx.wizard.state.index, profile)
+    if (!matched) return null
+    ctx.wizard.state.selection.department = matched.department
+    ctx.wizard.state.selection.departmentEmployees = matched.employees
+    ctx.wizard.state.selection.employee = matched.employee
+    return matched
+  }
+
   const wizard = new Scenes.WizardScene(
     'schedule-wizard',
     async (ctx) => {
@@ -270,7 +287,7 @@ function createScheduleWizard(getConfig, getUserProfile, saveUserProfile, getPro
       const sheets = await listSheets(config.excelPath)
       if (!sheets.length) {
         await ctx.reply('В файле Excel не найдены листы расписания.')
-        return ctx.scene.leave()
+        return leaveToMenu(ctx)
       }
 
       const today = new Date()
@@ -290,6 +307,19 @@ function createScheduleWizard(getConfig, getUserProfile, saveUserProfile, getPro
         if (currentWeek) {
           ctx.wizard.state.selection.weekId = currentWeek.id
           ctx.wizard.state.selection.weekLabel = currentWeek.label
+          const matched = await applyBoundProfile(ctx)
+          if (matched) {
+            await ctx.reply(
+              [
+                `Лист: ${autoSheet}`,
+                `Текущая неделя: ${currentWeek.label}`,
+                `Профиль: ${matched.employee}`,
+                'Как заполнить?'
+              ].join('\n'),
+              inputModeKeyboard()
+            )
+            return ctx.wizard.selectStep(5)
+          }
           await ctx.reply(
             [
               `Лист: ${autoSheet}`,
@@ -335,6 +365,14 @@ function createScheduleWizard(getConfig, getUserProfile, saveUserProfile, getPro
       await ctx.answerCbQuery()
       ctx.wizard.state.selection.weekId = weekId
       ctx.wizard.state.selection.weekLabel = week.label
+      const matched = await applyBoundProfile(ctx)
+      if (matched) {
+        await ctx.editMessageText(
+          `Неделя: ${week.label}\nПрофиль: ${matched.employee}\nКак заполнить?`,
+          inputModeKeyboard()
+        )
+        return ctx.wizard.selectStep(5)
+      }
       await ctx.editMessageText(
         `Неделя: ${week.label}\nВыберите отдел:`,
         departmentKeyboard(ctx.wizard.state.index.departments)
@@ -449,7 +487,7 @@ function createScheduleWizard(getConfig, getUserProfile, saveUserProfile, getPro
 
       if (action === 'cancel') {
         await ctx.editMessageText('Заполнение отменено.')
-        return ctx.scene.leave()
+        return leaveToMenu(ctx)
       }
 
       const selection = ctx.wizard.state.selection
@@ -511,7 +549,7 @@ function createScheduleWizard(getConfig, getUserProfile, saveUserProfile, getPro
         await ctx.editMessageText(`Ошибка сохранения: ${error.message}`)
       }
 
-      return ctx.scene.leave()
+      return leaveToMenu(ctx)
     },
     // step 12: freeform text
     async (ctx) => {
@@ -556,7 +594,7 @@ function createScheduleWizard(getConfig, getUserProfile, saveUserProfile, getPro
       await ctx.answerCbQuery()
       if (action === 'cancel') {
         await ctx.editMessageText('Заполнение отменено.')
-        return ctx.scene.leave()
+        return leaveToMenu(ctx)
       }
       const selection = ctx.wizard.state.selection
       const config = ctx.wizard.state.config
@@ -576,13 +614,13 @@ function createScheduleWizard(getConfig, getUserProfile, saveUserProfile, getPro
       } catch (error) {
         await ctx.editMessageText(`Ошибка сохранения: ${error.message}`)
       }
-      return ctx.scene.leave()
+      return leaveToMenu(ctx)
     }
   )
 
   wizard.command('cancel', async (ctx) => {
     await ctx.reply('Заполнение отменено.')
-    return ctx.scene.leave()
+    return leaveToMenu(ctx)
   })
 
   return wizard
@@ -662,7 +700,7 @@ function createProfileWizard(getConfig, getUserProfile, saveUserProfile) {
           formatLunchLine(lunchMinutes)
         ].join('\n')
       )
-      return ctx.scene.leave()
+      return leaveToMenu(ctx)
     }
   )
 
@@ -718,7 +756,7 @@ function registerBot(bot, deps) {
       const yearHint = extractYearFromSheetName(sheet)
       const week = findCurrentWeek(index.weeks, today, yearHint)
       if (!week) {
-        await ctx.reply('Текущая неделя не найдена. Используйте /show')
+        await ctx.reply('Текущая неделя не найдена на листе. Проверьте Excel.')
         return
       }
       await replyEmployeeSchedule(
@@ -730,6 +768,7 @@ function registerBot(bot, deps) {
         profile.rate,
         profile.lunchMinutes
       )
+      await ctx.reply('Выберите действие:', mainMenuKeyboard())
     } catch (error) {
       await ctx.reply(`Ошибка: ${error.message}`)
     }
@@ -800,9 +839,38 @@ function registerBot(bot, deps) {
     return ctx.scene.enter('schedule-wizard')
   })
 
-  bot.action('menu:view', async (ctx) => {
+  bot.action('menu:myschedule', async (ctx) => {
     await ctx.answerCbQuery()
-    return ctx.scene.enter('view-wizard')
+    const config = await deps.getConfig()
+    const profile = await deps.getUserProfile(ctx.from.id)
+    if (!profile) {
+      await ctx.reply('Сначала привяжите профиль: /my')
+      return
+    }
+    try {
+      const sheets = await listSheets(config.excelPath)
+      const today = new Date()
+      const sheet = findSheetForDate(sheets, today) || profile.sheetName
+      const index = await getScheduleIndex(config.excelPath, sheet)
+      const yearHint = extractYearFromSheetName(sheet)
+      const week = findCurrentWeek(index.weeks, today, yearHint)
+      if (!week) {
+        await ctx.reply('Текущая неделя не найдена на листе. Проверьте Excel.')
+        return
+      }
+      await replyEmployeeSchedule(
+        ctx,
+        config,
+        sheet,
+        week.id,
+        profile.employee,
+        profile.rate,
+        profile.lunchMinutes
+      )
+      await ctx.reply('Выберите действие:', mainMenuKeyboard())
+    } catch (error) {
+      await ctx.reply(`Ошибка: ${error.message}`)
+    }
   })
 
   bot.action('menu:profile', async (ctx) => {
@@ -851,6 +919,7 @@ function registerBot(bot, deps) {
       }
     }
     await ctx.reply(lines.join('\n'))
+    await ctx.reply('Выберите действие:', mainMenuKeyboard())
   })
 }
 

@@ -35,7 +35,8 @@ const WORK_TYPES = {
     id: 'remote',
     label: 'Дистанционно',
     emoji: '🟧',
-    value: 1.0,
+    // Letter marks remote; color alone is unreliable in Sheets/viewers.
+    value: 'Д',
     color: 'FFFF6D01'
   }
 }

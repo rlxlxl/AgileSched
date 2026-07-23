@@ -8,7 +8,7 @@ const {
   extractYearFromSheetName
 } = require('../week-dates')
 const { formatNormSummary } = require('../hours-calculator')
-const { formatRateLine, formatLunchLine, normalizeLunchMinutes } = require('../profile')
+const { formatRateLine, formatLunchLine, normalizeLunchMinutes, matchProfileInIndex } = require('../profile')
 const {
   parseFreeformSchedule,
   formatFreeformPreview
@@ -62,13 +62,12 @@ function buildPreview(selection) {
 
 function mainMenuText() {
   return [
-    'Бот расписания РиМ (как в Telegram).',
+    'Бот расписания РиМ.',
     '',
-    '1 — Заполнить расписание  (/schedule)',
-    '2 — Показать расписание   (/show)',
-    '3 — Привязать профиль     (/my)',
-    '4 — Моё расписание        (/myschedule)',
-    '5 — Статус                (/status)',
+    '1 — Заполнить расписание',
+    '2 — Привязать профиль',
+    '3 — Моё расписание',
+    '4 — Статус',
     '',
     'Напишите номер или команду. /cancel — отмена'
   ].join('\n')
@@ -182,34 +181,55 @@ async function createYougileChatBot(deps) {
 
   async function maybeApplyLinkedEmployee(chatId, session) {
     let profile = session.linkedProfile
+    let label = 'Ответственный'
     if (!profile) {
       const linked = await getLinkedProfile(chatId)
       profile = linked && linked.profile
     }
+    if (!profile && session.userId) {
+      profile = await getUserProfile(session.userId)
+      label = 'Профиль'
+    }
     if (!profile || !session.index) return false
 
-    const department = session.index.departments.find(function (d) {
-      return d.name === profile.department
-    })
-    if (!department) return false
-    if (department.employees.indexOf(profile.employee) === -1) {
-      return false
-    }
+    const matched = matchProfileInIndex(session.index, profile)
+    if (!matched) return false
 
-    session.selection.department = department.name
-    session.selection.employee = profile.employee
-    session.options = DAYS.slice()
-    session.step = 'startDay'
+    session.selection.department = matched.department
+    session.selection.employee = matched.employee
+    session.options = ['Пошагово', 'Одним сообщением']
+    session.step = 'input-mode'
     await askList(
       chatId,
-      'Ответственный: ' +
-        profile.employee +
-        '\nВыберите начало недели:',
-      session.options.map(function (d) {
-        return DAY_SHORT[d] + ' (' + d + ')'
-      })
+      label + ': ' + matched.employee + '\nКак заполнить?',
+      session.options
     )
     return true
+  }
+
+  async function backToMenu(chatId, session, message) {
+    if (message) {
+      await reply(chatId, message)
+    }
+    const linkedProfile = session.linkedProfile
+    const linkedAssigneeUserId = session.linkedAssigneeUserId
+    const userId = session.userId
+    session.step = 'menu'
+    session.flow = null
+    session.selection = {}
+    session.index = null
+    session.options = null
+    session.weekIds = null
+    session.slots = null
+    session.allowedDays = null
+    session.allowedSlots = null
+    session.workTypes = null
+    session.freeformEntries = null
+    session.lunchValues = null
+    session.linkedProfile = linkedProfile
+    session.linkedAssigneeUserId = linkedAssigneeUserId
+    session.userId = userId
+    await reply(chatId, mainMenuText())
   }
 
   async function showStatus(chatId, userId) {
@@ -273,7 +293,7 @@ async function createYougileChatBot(deps) {
     const yearHint = extractYearFromSheetName(sheet)
     const week = findCurrentWeek(index.weeks, today, yearHint)
     if (!week) {
-      await reply(chatId, 'Текущая неделя не найдена. Используйте /show')
+      await reply(chatId, 'Текущая неделя не найдена. Укажите неделю через /schedule или обновите лист.')
       return
     }
     const result = await getEmployeeWeekSchedule(
@@ -296,18 +316,20 @@ async function createYougileChatBot(deps) {
     const lower = text.toLowerCase()
     const key = sessionKey(chatId, fromUserId)
     let session = sessions.get(key)
+    if (session) {
+      session.userId = fromUserId
+    }
 
     console.log('[agile-sched] chat:', chatId, 'user:', fromUserId, 'text:', text)
 
     if (lower === '/cancel' || lower === 'отмена' || lower === 'cancel') {
       if (!session) return
-      sessions.delete(key)
-      await reply(chatId, 'Отменено.')
+      await backToMenu(chatId, session, 'Отменено.')
       return
     }
 
     if (isStartCommand(lower)) {
-      session = { step: 'menu', selection: {} }
+      session = { step: 'menu', selection: {}, userId: fromUserId }
       const linked = await getLinkedProfile(chatId)
       applyLinkedProfileToSession(session, linked)
       sessions.set(key, session)
@@ -326,6 +348,7 @@ async function createYougileChatBot(deps) {
 
     if (isCommand(lower, '/status')) {
       await showStatus(chatId, fromUserId)
+      await backToMenu(chatId, session)
       return
     }
 
@@ -335,6 +358,7 @@ async function createYougileChatBot(deps) {
       } catch (error) {
         await reply(chatId, 'Ошибка: ' + error.message)
       }
+      await backToMenu(chatId, session)
       return
     }
 
@@ -343,8 +367,7 @@ async function createYougileChatBot(deps) {
       try {
         await startSchedule(chatId, session, config)
       } catch (error) {
-        sessions.delete(key)
-        await reply(chatId, 'Ошибка: ' + error.message)
+        await backToMenu(chatId, session, 'Ошибка: ' + error.message)
       }
       return
     }
@@ -354,8 +377,7 @@ async function createYougileChatBot(deps) {
       try {
         await startView(chatId, session, config)
       } catch (error) {
-        sessions.delete(key)
-        await reply(chatId, 'Ошибка: ' + error.message)
+        await backToMenu(chatId, session, 'Ошибка: ' + error.message)
       }
       return
     }
@@ -365,8 +387,7 @@ async function createYougileChatBot(deps) {
       try {
         await startProfile(chatId, session, config)
       } catch (error) {
-        sessions.delete(key)
-        await reply(chatId, 'Ошибка: ' + error.message)
+        await backToMenu(chatId, session, 'Ошибка: ' + error.message)
       }
       return
     }
@@ -374,42 +395,38 @@ async function createYougileChatBot(deps) {
     try {
       await runStep(chatId, fromUserId, session, text, key)
     } catch (error) {
-      sessions.delete(key)
       if (logger && logger.error) {
         logger.error('[agile-sched] yougile chat error', error)
       }
-      await reply(chatId, 'Ошибка: ' + (error.message || String(error)))
+      await backToMenu(chatId, session, 'Ошибка: ' + (error.message || String(error)))
     }
   }
 
   async function runStep(chatId, userId, session, text, key) {
     const config = await getConfig()
     const lower = text.toLowerCase()
+    session.userId = userId
 
     if (session.step === 'menu') {
-      let choice = parseChoice(text, 5)
+      let choice = parseChoice(text, 4)
       if (choice === null && isCommand(lower, '/schedule')) choice = 0
-      if (choice === null && isCommand(lower, '/show')) choice = 1
-      if (choice === null && isCommand(lower, '/my')) choice = 2
-      if (choice === null && isCommand(lower, '/myschedule')) choice = 3
-      if (choice === null && isCommand(lower, '/status')) choice = 4
+      if (choice === null && isCommand(lower, '/my')) choice = 1
+      if (choice === null && isCommand(lower, '/myschedule')) choice = 2
+      if (choice === null && isCommand(lower, '/status')) choice = 3
 
       if (choice === null) {
         await reply(chatId, mainMenuText())
         return
       }
       if (choice === 0) return startSchedule(chatId, session, config)
-      if (choice === 1) return startView(chatId, session, config)
-      if (choice === 2) return startProfile(chatId, session, config)
-      if (choice === 3) {
+      if (choice === 1) return startProfile(chatId, session, config)
+      if (choice === 2) {
         await showMySchedule(chatId, userId)
-        sessions.delete(key)
-        return
+        return backToMenu(chatId, session)
       }
-      if (choice === 4) {
+      if (choice === 3) {
         await showStatus(chatId, userId)
-        sessions.delete(key)
-        return
+        return backToMenu(chatId, session)
       }
     }
 
@@ -486,8 +503,7 @@ async function createYougileChatBot(deps) {
           { rate: empProfile.rate, lunchMinutes: empProfile.lunchMinutes }
         )
         await reply(chatId, session.selection.employee + '\n' + result.text)
-        sessions.delete(key)
-        return
+        return backToMenu(chatId, session)
       }
       session.options = ['Пошагово', 'Одним сообщением']
       session.step = 'input-mode'
@@ -584,9 +600,7 @@ async function createYougileChatBot(deps) {
         return
       }
       if (idx === 1) {
-        sessions.delete(key)
-        await reply(chatId, 'Заполнение отменено.')
-        return
+        return backToMenu(chatId, session, 'Заполнение отменено.')
       }
       let cellsUpdated = 0
       let backupPath = null
@@ -609,7 +623,6 @@ async function createYougileChatBot(deps) {
         backupPath = result.backupPath
         driveSyncHint = result.driveSyncHint
       }
-      sessions.delete(key)
       const lines = [
         'Расписание сохранено',
         'Обновлено ячеек: ' + cellsUpdated,
@@ -632,8 +645,7 @@ async function createYougileChatBot(deps) {
       } catch (summaryError) {
         lines.push('', 'Не удалось пересчитать часы: ' + summaryError.message)
       }
-      await reply(chatId, lines.join('\n'))
-      return
+      return backToMenu(chatId, session, lines.join('\n'))
     }
 
     if (session.step === 'profile-emp') {
@@ -698,8 +710,7 @@ async function createYougileChatBot(deps) {
           formatLunchLine(lunchMinutes)
         ].join('\n')
       )
-      sessions.delete(key)
-      return
+      return backToMenu(chatId, session)
     }
 
     if (session.step === 'startDay') {
@@ -805,16 +816,13 @@ async function createYougileChatBot(deps) {
         return
       }
       if (idx === 1) {
-        sessions.delete(key)
-        await reply(chatId, 'Заполнение отменено.')
-        return
+        return backToMenu(chatId, session, 'Заполнение отменено.')
       }
       const result = await applyScheduleRange(
         config.excelPath,
         session.selection.sheetName,
         session.selection
       )
-      sessions.delete(key)
       const lines = [
         'Расписание сохранено',
         'Обновлено ячеек: ' + result.cellsUpdated,
@@ -838,23 +846,20 @@ async function createYougileChatBot(deps) {
       } catch (summaryError) {
         lines.push('', 'Не удалось пересчитать часы: ' + summaryError.message)
       }
-      await reply(chatId, lines.join('\n'))
+      return backToMenu(chatId, session, lines.join('\n'))
     }
   }
 
   async function startSchedule(chatId, session, config) {
     const access = assertAccess(config.excelPath)
     if (!access.ok) {
-      await reply(chatId, access.error)
-      session.step = 'menu'
-      return
+      return backToMenu(chatId, session, access.error)
     }
     session.flow = 'schedule'
     session.selection = {}
     const sheets = await listSheets(config.excelPath)
     if (!sheets.length) {
-      await reply(chatId, 'В файле Excel не найдены листы расписания.')
-      return
+      return backToMenu(chatId, session, 'В файле Excel не найдены листы расписания.')
     }
     const today = new Date()
     const autoSheet = findSheetForDate(sheets, today)

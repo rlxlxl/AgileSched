@@ -63,6 +63,27 @@ function lunchLabel(minutes) {
   return minutes / 60 + ' ч'
 }
 
+/**
+ * If profile department/employee exist on the sheet index, return a match.
+ * Used to skip dept/employee pickers when /my (or linked assignee) is set.
+ */
+function matchProfileInIndex(index, profile) {
+  if (!profile || !index || !Array.isArray(index.departments)) return null
+  if (!profile.department || !profile.employee) return null
+
+  const department = index.departments.find(function (d) {
+    return d.name === profile.department
+  })
+  if (!department) return null
+  if (department.employees.indexOf(profile.employee) === -1) return null
+
+  return {
+    department: department.name,
+    employee: profile.employee,
+    employees: department.employees
+  }
+}
+
 module.exports = {
   DEFAULT_RATE,
   DEFAULT_LUNCH_MINUTES,
@@ -72,6 +93,7 @@ module.exports = {
   normalizeRemindHour,
   normalizeRemindWeekday,
   normalizeProfile,
+  matchProfileInIndex,
   formatRateLine,
   formatLunchLine,
   lunchLabel

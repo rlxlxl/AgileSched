@@ -14,22 +14,7 @@ const { numberToCol } = require(path.join(extensionRoot, 'lib/xlsx-patcher'))
 
 const GREEN_STYLE_IDS = new Set([16, 43])
 
-function cellFillColor(cell) {
-  const fill = cell.fill
-  if (!fill || fill.type !== 'pattern' || fill.pattern === 'none') return null
-  const fg = fill.fgColor
-  if (!fg) return null
-  if (fg.argb) return { rgb: String(fg.argb).toUpperCase(), theme: null }
-  if (fg.theme != null) return { rgb: null, theme: fg.theme }
-  return null
-}
-
-function isOrangeFill(fill) {
-  if (!fill) return false
-  return fill.rgb === 'FFFF6D01' || fill.theme === 8
-}
-
-async function verifyRemoteColor(excelPath, sheetName, targets, styleId) {
+async function verifyRemoteValue(excelPath, sheetName, targets, styleId) {
   if (GREEN_STYLE_IDS.has(styleId)) {
     throw new Error(`Remote write used green style ${styleId}`)
   }
@@ -40,15 +25,13 @@ async function verifyRemoteColor(excelPath, sheetName, targets, styleId) {
   const sample = targets[0]
   const ref = `${numberToCol(sample.col)}${sample.row}`
   const cell = ws.getCell(ref)
-  const fill = cellFillColor(cell)
+  const text = String(cell.value == null ? '' : cell.value).trim()
 
-  if (!isOrangeFill(fill)) {
-    throw new Error(
-      `Remote cell ${ref} has wrong fill: ${JSON.stringify(fill)} (expected FFFF6D01 or theme:8)`
-    )
+  if (text.toLowerCase() !== 'д') {
+    throw new Error(`Remote cell ${ref} has wrong value: ${JSON.stringify(cell.value)} (expected Д)`)
   }
 
-  console.log(` - remote style ${styleId}, cell ${ref} fill:`, fill)
+  console.log(` - remote style ${styleId}, cell ${ref} value:`, cell.value)
 }
 
 async function main() {
@@ -129,7 +112,7 @@ async function main() {
   console.log(' - cells updated:', remoteResult.cellsUpdated)
   console.log(' - style id:', remoteResult.patchInfo.styleId)
 
-  await verifyRemoteColor(
+  await verifyRemoteValue(
     testExcel,
     sheetName,
     remoteResult.targets,

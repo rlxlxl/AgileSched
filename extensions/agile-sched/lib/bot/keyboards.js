@@ -109,7 +109,7 @@ function inputModeKeyboard() {
 function mainMenuKeyboard() {
   return Markup.inlineKeyboard([
     [Markup.button.callback('Заполнить расписание', 'menu:schedule')],
-    [Markup.button.callback('Показать расписание', 'menu:view')],
+    [Markup.button.callback('Моё расписание', 'menu:myschedule')],
     [Markup.button.callback('Привязать профиль (/my)', 'menu:profile')]
   ])
 }

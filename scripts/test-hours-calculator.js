@@ -23,6 +23,7 @@ assert.strictEqual(cellWorkHours(cell('')), 0)
 assert.strictEqual(cellWorkHours(cell(0.5)), 0.5)
 assert.strictEqual(cellWorkHours(cell(1)), 1)
 assert.strictEqual(cellWorkHours(cell('д')), 1)
+assert.strictEqual(cellWorkHours(cell('Д')), 1)
 
 assert.strictEqual(getWeeklyNorm(1), 40)
 assert.strictEqual(getWeeklyNorm(0.5), 20)

@@ -7,11 +7,12 @@ const OFFICE_GREEN = 'FF00B050'
 const REMOTE_ORANGE_RGB = 'FFFF6D01'
 const REMOTE_THEME_INDEX = 8
 
-// Data-cell styles first; legend styles (row 9) appended dynamically
+// Data-cell styles first; legend styles (row 9) appended dynamically.
+// Remote: explicit RGB orange first; theme-only (60) is last-resort fallback.
 const PREFERRED_STYLE_IDS = {
   semi: [132, 42, 44, 58, 143],
   office: [43, 16, 102, 51],
-  remote: [60, 49, 110, 133]
+  remote: [49, 110, 133, 60]
 }
 
 const LEGEND_CELLS = { F: 'semi', G: 'office', H: 'remote' }
@@ -118,9 +119,14 @@ function isGreenFill(fillColor) {
   return fillColor.rgb === OFFICE_GREEN
 }
 
+function isExplicitOrangeRgb(fillColor) {
+  if (!fillColor) return false
+  return fillColor.rgb === REMOTE_ORANGE_RGB
+}
+
 function isOrangeFill(fillColor) {
   if (!fillColor) return false
-  return fillColor.rgb === REMOTE_ORANGE_RGB || fillColor.theme === REMOTE_THEME_INDEX
+  return isExplicitOrangeRgb(fillColor) || fillColor.theme === REMOTE_THEME_INDEX
 }
 
 function resolveLegendStyles(sheetXml) {
@@ -135,9 +141,17 @@ function resolveLegendStyles(sheetXml) {
 function buildPreferredIds(workTypeId, legendStyles) {
   const base = [...(PREFERRED_STYLE_IDS[workTypeId] || [])]
   const legendId = legendStyles?.[workTypeId]
-  if (legendId != null && !base.includes(legendId)) {
-    base.push(legendId)
+  if (legendId == null || base.includes(legendId)) return base
+
+  if (workTypeId === 'remote') {
+    // Keep legend before theme-only fallback (60), after explicit RGB styles.
+    const themeFallbackIdx = base.indexOf(60)
+    if (themeFallbackIdx >= 0) base.splice(themeFallbackIdx, 0, legendId)
+    else base.push(legendId)
+    return base
   }
+
+  base.push(legendId)
   return base
 }
 
@@ -156,6 +170,11 @@ function pickStyleId(byColor, color, preferredIds, themeStyleIds = [], stylesXml
   }
 
   if (stylesXml && workTypeId === 'remote') {
+    // Prefer explicit RGB orange so viewers without the workbook theme stay orange.
+    for (const id of candidates) {
+      const fill = styleFillColor(stylesXml, id)
+      if (isExplicitOrangeRgb(fill) && !isGreenFill(fill)) return id
+    }
     for (const id of candidates) {
       const fill = styleFillColor(stylesXml, id)
       if (isOrangeFill(fill) && !isGreenFill(fill)) return id
@@ -186,7 +205,7 @@ function resolveWorkTypeStyle(stylesXml, workTypeId, legendStyles = {}) {
 
   if (workTypeId === 'remote') {
     const fill = styleFillColor(stylesXml, styleId)
-    if (isGreenFill(fill)) {
+    if (isGreenFill(fill) || (PREFERRED_STYLE_IDS.office || []).includes(styleId)) {
       throw new Error(
         `Для «${workType.label}» выбран зелёный стиль ${styleId}. ` +
           'Проверьте легенду и стили заливки в Excel.'
@@ -233,9 +252,24 @@ async function resolveSheetPath(zip, sheetName) {
   throw new Error(`Не найден путь листа для rId=${rId}`)
 }
 
+function escapeXmlText(text) {
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+}
+
 function buildCellXml(ref, styleId, value) {
-  const num = Number(value)
-  return `<c r="${ref}" s="${styleId}"><v>${num}</v></c>`
+  const styleAttr = styleId != null ? ` s="${styleId}"` : ''
+  const asNum = Number(value)
+  if (typeof value === 'string' && value !== '' && !Number.isFinite(asNum)) {
+    return (
+      `<c r="${ref}"${styleAttr} t="inlineStr">` +
+      `<is><t>${escapeXmlText(value)}</t></is></c>`
+    )
+  }
+  return `<c r="${ref}"${styleAttr}><v>${asNum}</v></c>`
 }
 
 function upsertCellInRow(rowXml, ref, cellXml) {
