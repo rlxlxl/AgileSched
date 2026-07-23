@@ -9,6 +9,7 @@ Telegram-бот заполняет график в Excel «Расписашка 
 | Дистанционно | `#FF6D01` (по возможности) | `Д` |
 
 ## Требования
+## Для коробки токен не нужен!!!
 
 - YouGile Платформа (Docker или коробка) + модуль `yougile-platform-sdk`
 - Telegram-бот (токен от [@BotFather](https://t.me/botfather))
